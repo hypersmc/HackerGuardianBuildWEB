@@ -47,11 +47,11 @@ type Props = {
   onSceneReady?: () => void
 }
 
-function direction(player: ReplayPlayerFrame) {
+function direction(player: ReplayPlayerFrame, target = new Vector3()) {
   const yaw = MathUtils.degToRad(player.rotation.yaw)
   const pitch = MathUtils.degToRad(player.rotation.pitch)
   const cosPitch = Math.cos(pitch)
-  return new Vector3(
+  return target.set(
     -Math.sin(yaw) * cosPitch,
     -Math.sin(pitch),
     Math.cos(yaw) * cosPitch,
@@ -60,34 +60,44 @@ function direction(player: ReplayPlayerFrame) {
 
 function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | null; origin: Origin; mode: CameraMode }) {
   const { camera } = useThree()
+  const local = useMemo(() => new Vector3(), [])
   const desired = useMemo(() => new Vector3(), [])
   const lookAt = useMemo(() => new Vector3(), [])
+  const aim = useMemo(() => new Vector3(), [])
+  const horizontal = useMemo(() => new Vector3(), [])
 
   useFrame((_, delta) => {
     if (!subject || mode === 'free') return
 
-    const local = new Vector3(
+    local.set(
       subject.position.x - origin.x,
       subject.position.y - origin.y,
       subject.position.z - origin.z,
     )
-    const aim = direction(subject)
+    direction(subject, aim)
     const eyeHeight = subject.sneaking ? 1.5 : 1.62
 
     if (mode === 'pov') {
-      desired.copy(local).add(new Vector3(0, eyeHeight, 0))
+      // POV is evidence, not a cinematic chase camera. The previous extra lerp
+      // deliberately lagged behind the already-interpolated replay track and made
+      // mouse/head motion feel delayed. Match the recorded eye position directly.
+      desired.copy(local).y += eyeHeight
       lookAt.copy(desired).addScaledVector(aim, 10)
-      camera.position.lerp(desired, 1 - Math.exp(-delta * 18))
+      camera.position.copy(desired)
       camera.lookAt(lookAt)
       return
     }
 
-    const horizontal = aim.clone().setY(0)
+    horizontal.copy(aim).setY(0)
     if (horizontal.lengthSq() < 0.001) horizontal.set(0, 0, 1)
     horizontal.normalize()
-    desired.copy(local).add(new Vector3(0, 2.3, 0)).addScaledVector(horizontal, -5.4)
-    lookAt.copy(local).add(new Vector3(0, 1.05, 0))
-    camera.position.lerp(desired, 1 - Math.exp(-delta * 7))
+    desired.copy(local).y += 2.3
+    desired.addScaledVector(horizontal, -5.4)
+    lookAt.copy(local).y += 1.05
+
+    // Keep a little third-person camera inertia, but follow tightly enough that the
+    // subject does not visibly outrun the camera between replay samples.
+    camera.position.lerp(desired, 1 - Math.exp(-delta * 16))
     camera.lookAt(lookAt)
   })
 
@@ -252,8 +262,12 @@ function Scene({
         enabled={cameraMode === 'free'}
         target={target}
         makeDefault
-        enableDamping
-        dampingFactor={0.08}
+        // Freecam should track input immediately. Damping made mouse movement feel
+        // several frames behind, which is especially obvious while the replay runs.
+        enableDamping={false}
+        rotateSpeed={0.85}
+        zoomSpeed={1.1}
+        panSpeed={1}
         maxDistance={160}
         minDistance={0.4}
       />

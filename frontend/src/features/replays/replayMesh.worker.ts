@@ -1,4 +1,5 @@
 import type { MinecraftAssetCatalog } from './minecraftAssets'
+import { normalizeLegacyReplayEvents } from './legacyBlockState'
 import {
   buildMinecraftGeometry,
   createMinecraftGeometryCache,
@@ -273,7 +274,10 @@ async function build(message: BuildMessage) {
         revisions: 0,
         detail: `Expanding recorded section ${index + 1}/${sections.length}`,
       })
-      const events = eventsBySection.get(section.key) ?? []
+      // New recordings already carry exact BlockData. Legacy recordings can only
+      // tell us the Material name; normalize those events to one deterministic,
+      // valid resource-pack variant for rendering without modifying evidence.
+      const events = normalizeLegacyReplayEvents(eventsBySection.get(section.key) ?? [], catalog)
       const base = decodeSectionBlocks(section)
       if (events.length === 0) {
         const key = chunkKey(section)
