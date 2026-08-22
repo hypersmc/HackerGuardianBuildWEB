@@ -7,6 +7,11 @@ import {
   type VoxelWorld,
 } from './voxel'
 
+/**
+ * Lightweight section descriptor retained on the browser main thread. The RLE
+ * payload is deliberately not expanded into hundreds of thousands of Map entries
+ * until it reaches the replay mesh worker.
+ */
 export type ReplayWorldSection = {
   key: string
   world: string
@@ -15,46 +20,22 @@ export type ReplayWorldSection = {
   baseY: number
   height: number
   anchorMs: number
-  blocks: VoxelWorld
+  palette: string[]
+  runs: Array<[number, number]>
 }
 
 export function worldSectionKey(world: string, chunkX: number, baseY: number, chunkZ: number) {
   return `${world}:${chunkX},${baseY},${chunkZ}`
 }
 
+/**
+ * Index the replay's stored sections without expanding the RLE voxel payload.
+ * Expansion/model resolution is CPU-heavy and belongs in replayMesh.worker.ts.
+ */
 export function decodeReplayWorldSections(chunks: WorldChunkData[]): ReplayWorldSection[] {
   const result: ReplayWorldSection[] = []
-
   for (const chunk of chunks) {
     for (const section of chunk.sections) {
-      const blocks: VoxelWorld = new Map()
-      let linear = 0
-
-      for (const [paletteIndex, count] of section.runs) {
-        const rawState = section.palette[paletteIndex]
-        if (rawState === undefined) {
-          linear += count
-          continue
-        }
-
-        const state = normalizeState(rawState)
-        for (let i = 0; i < count; i++, linear++) {
-          if (isAir(state)) continue
-          const localY = Math.floor(linear / 256)
-          const remainder = linear % 256
-          const localX = Math.floor(remainder / 16)
-          const localZ = remainder % 16
-          blocks.set(
-            blockKey(
-              chunk.chunk_x * 16 + localX,
-              section.base_y + localY,
-              chunk.chunk_z * 16 + localZ,
-            ),
-            state,
-          )
-        }
-      }
-
       result.push({
         key: worldSectionKey(chunk.world, chunk.chunk_x, section.base_y, chunk.chunk_z),
         world: chunk.world,
@@ -63,18 +44,47 @@ export function decodeReplayWorldSections(chunks: WorldChunkData[]): ReplayWorld
         baseY: section.base_y,
         height: section.height,
         anchorMs: Math.max(0, chunk.anchor_ms ?? 0),
-        blocks,
+        palette: section.palette,
+        runs: section.runs,
       })
     }
   }
-
   return result
 }
 
-export function indexBlockEventsBySection(
-  events: TimedReplayEvent[],
-  defaultWorld: string,
-): Map<string, TimedReplayEvent[]> {
+export function decodeSectionBlocks(section: ReplayWorldSection): VoxelWorld {
+  const blocks: VoxelWorld = new Map()
+  let linear = 0
+
+  for (const [paletteIndex, count] of section.runs) {
+    const rawState = section.palette[paletteIndex]
+    if (rawState === undefined) {
+      linear += count
+      continue
+    }
+
+    const state = normalizeState(rawState)
+    for (let i = 0; i < count; i++, linear++) {
+      if (isAir(state)) continue
+      const localY = Math.floor(linear / 256)
+      const remainder = linear % 256
+      const localX = Math.floor(remainder / 16)
+      const localZ = remainder % 16
+      blocks.set(
+        blockKey(
+          section.chunkX * 16 + localX,
+          section.baseY + localY,
+          section.chunkZ * 16 + localZ,
+        ),
+        state,
+      )
+    }
+  }
+
+  return blocks
+}
+
+export function indexBlockEventsBySection(events: TimedReplayEvent[], defaultWorld: string): Map<string, TimedReplayEvent[]> {
   const result = new Map<string, TimedReplayEvent[]>()
 
   for (const event of events) {
@@ -95,7 +105,6 @@ export function indexBlockEventsBySection(
 
 export function sectionWorldRevision(events: TimedReplayEvent[], playhead: number, anchor: number) {
   let count = 0
-
   if (playhead >= anchor) {
     for (const event of events) {
       if (event.t > anchor && event.t <= playhead) count++
@@ -109,14 +118,8 @@ export function sectionWorldRevision(events: TimedReplayEvent[], playhead: numbe
   return count === 0 ? 'base' : `reverse:${count}`
 }
 
-export function applySectionAtTime(
-  base: VoxelWorld,
-  events: TimedReplayEvent[],
-  playhead: number,
-  anchor: number,
-): VoxelWorld {
+export function applySectionAtTime(base: VoxelWorld, events: TimedReplayEvent[], playhead: number, anchor: number): VoxelWorld {
   if (events.length === 0) return base
-
   const world = new Map(base)
 
   if (playhead >= anchor) {
@@ -128,7 +131,6 @@ export function applySectionAtTime(
       if (event.t > playhead && event.t <= anchor) applyReverse(world, event)
     }
   }
-
   return world
 }
 
@@ -161,25 +163,16 @@ function applyForward(world: VoxelWorld, event: TimedReplayEvent) {
   if (!event.position) return
   const key = blockKey(event.position.x, event.position.y, event.position.z)
   if (event.type === 'BLOCK_BREAK') world.delete(key)
-  if (event.type === 'BLOCK_PLACE' && typeof event.block === 'string') {
-    world.set(key, normalizeState(event.block))
-  }
+  if (event.type === 'BLOCK_PLACE' && typeof event.block === 'string') world.set(key, normalizeState(event.block))
 }
 
 function applyReverse(world: VoxelWorld, event: TimedReplayEvent) {
   if (!event.position) return
   const key = blockKey(event.position.x, event.position.y, event.position.z)
-
-  if (event.type === 'BLOCK_BREAK' && typeof event.block === 'string') {
-    world.set(key, normalizeState(event.block))
-  }
-
+  if (event.type === 'BLOCK_BREAK' && typeof event.block === 'string') world.set(key, normalizeState(event.block))
   if (event.type === 'BLOCK_PLACE') {
-    if (typeof event.previous_block === 'string' && !isAir(event.previous_block)) {
-      world.set(key, normalizeState(event.previous_block))
-    } else {
-      world.delete(key)
-    }
+    if (typeof event.previous_block === 'string' && !isAir(event.previous_block)) world.set(key, normalizeState(event.previous_block))
+    else world.delete(key)
   }
 }
 

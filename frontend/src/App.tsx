@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
+import { WebGpuRouteGuard } from './components/WebGpuRouteGuard'
 import {
   DashboardPage,
   DetectionPage,
@@ -20,7 +21,7 @@ export function App() {
       <Route element={<AppShell />}>
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/reports" element={<ReportsPage />} />
-        <Route path="/replays" element={<Replay3DPage />} />
+        <Route path="/replays" element={<WebGpuRouteGuard><Replay3DPage /></WebGpuRouteGuard>} />
         <Route path="/moderation" element={<ModerationPage />} />
         <Route path="/detection" element={<DetectionPage />} />
         <Route path="/servers" element={<ServersPage />} />
