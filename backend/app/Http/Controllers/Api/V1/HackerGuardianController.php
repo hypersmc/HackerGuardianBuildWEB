@@ -58,6 +58,24 @@ final class HackerGuardianController extends Controller
         return $this->relay($hg, '/v1/replays/'.$id.'/chunks/'.$seq);
     }
 
+    public function replayWorld(int $id, HackerGuardianClient $hg): HttpResponse
+    {
+        return $this->relay($hg, '/v1/replays/'.$id.'/world');
+    }
+
+    public function replayWorldChunk(Request $request, int $id, int $x, int $z, HackerGuardianClient $hg): HttpResponse
+    {
+        $query = $request->validate([
+            'world' => ['sometimes', 'nullable', 'string', 'max:128'],
+        ]);
+
+        return $this->relay(
+            $hg,
+            '/v1/replays/'.$id.'/world/chunks/'.$x.'/'.$z,
+            $this->clean($query)
+        );
+    }
+
     public function detectionStatus(HackerGuardianClient $hg): HttpResponse
     {
         return $this->relay($hg, '/v1/detection/status');

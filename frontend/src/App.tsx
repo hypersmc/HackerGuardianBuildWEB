@@ -5,11 +5,11 @@ import {
   DetectionPage,
   ModerationPage,
   ReportsPage,
-  ReplaysPage,
   ServersPage,
   SettingsPage,
   UsersPage,
 } from './pages/ConsolePages'
+import { Replay3DPage } from './pages/Replay3DPage'
 import { LoginPage } from './pages/LoginPage'
 
 export function App() {
@@ -20,7 +20,7 @@ export function App() {
       <Route element={<AppShell />}>
         <Route path="/dashboard" element={<DashboardPage />} />
         <Route path="/reports" element={<ReportsPage />} />
-        <Route path="/replays" element={<ReplaysPage />} />
+        <Route path="/replays" element={<Replay3DPage />} />
         <Route path="/moderation" element={<ModerationPage />} />
         <Route path="/detection" element={<DetectionPage />} />
         <Route path="/servers" element={<ServersPage />} />
