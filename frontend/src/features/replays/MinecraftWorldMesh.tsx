@@ -59,21 +59,29 @@ function GeometryGroups({
     <>
       {groups.map((group) => {
         const texture = group.texture ? textures.get(group.texture) : null
+        const translucent = group.layer === 'translucent'
         return (
           <mesh
             key={`${prefix}:${group.key}`}
             geometry={group.geometry}
-            renderOrder={group.layer === 'translucent' ? 2 : group.layer === 'cutout' ? 1 : 0}
+            renderOrder={translucent ? 2 : group.layer === 'cutout' ? 1 : 0}
           >
             <meshStandardMaterial
               map={texture ?? undefined}
               vertexColors
               roughness={texture ? 0.9 : 0.88}
               metalness={0}
-              alphaTest={group.layer === 'cutout' ? 0.1 : 0}
-              transparent={group.layer === 'translucent'}
-              opacity={group.layer === 'translucent' ? 0.76 : 1}
-              depthWrite={group.layer !== 'translucent'}
+              // Minecraft has many alpha-cut textures whose block id is not enough
+              // to infer the render layer (poppy/dandelion are common examples).
+              // Apply an alpha discard to every ordinary textured surface: fully
+              // opaque terrain is unaffected while transparent PNG pixels no longer
+              // render as black quads.
+              alphaTest={texture ? (translucent ? 0.01 : 0.5) : 0}
+              transparent={translucent}
+              // Preserve the resource-pack alpha instead of applying an arbitrary
+              // scene-wide 0.76 opacity to glass/water textures.
+              opacity={1}
+              depthWrite={!translucent}
             />
           </mesh>
         )

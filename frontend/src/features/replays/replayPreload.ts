@@ -13,6 +13,7 @@ import type {
   MinecraftModelElement,
 } from './minecraftAssets'
 import { minecraftAssetApi } from './minecraftAssets'
+import { resolveLegacyRenderState } from './legacyBlockState'
 import { isAir, normalizeState } from './voxel'
 
 type BlockState = {
@@ -153,7 +154,10 @@ export function collectReplayTextureAssets(states: Iterable<string>, catalog: Mi
   const modelCache = new Map<string, ResolvedModel | null>()
 
   for (const raw of states) {
-    const state = parseBlockState(raw)
+    // Legacy block events can contain only `GRASS_BLOCK`/`OAK_STAIRS`, which is
+    // insufficient to match modern blockstate variants. Resolve a deterministic
+    // render-only variant before deciding which textures must be preloaded.
+    const state = parseBlockState(resolveLegacyRenderState(raw, catalog))
     if (isAir(state.id)) continue
     const definition = catalog.blockstates[state.id]
     if (!definition) continue
