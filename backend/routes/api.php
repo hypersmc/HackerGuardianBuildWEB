@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\DashboardController;
 use App\Http\Controllers\Api\V1\HackerGuardianController;
+use App\Http\Controllers\Api\V1\MinecraftAssetController;
 use App\Http\Controllers\Api\V1\SystemController;
 use App\Http\Controllers\Api\V1\UsersController;
 use Illuminate\Support\Facades\Route;
@@ -18,6 +19,14 @@ Route::prefix('v1')->group(function (): void {
         Route::get('/users', [UsersController::class, 'index']);
         Route::get('/system', SystemController::class);
 
+        // Locally imported Minecraft client/resource-pack assets. These files are
+        // never committed with HackerGuardian and remain staff-authenticated.
+        Route::get('/replay-assets', [MinecraftAssetController::class, 'index']);
+        Route::get('/replay-assets/{pack}/catalog', [MinecraftAssetController::class, 'catalog'])
+            ->where('pack', '[A-Za-z0-9._-]+');
+        Route::get('/replay-assets/{pack}/texture', [MinecraftAssetController::class, 'texture'])
+            ->where('pack', '[A-Za-z0-9._-]+');
+
         // Read-only HackerGuardian API v1 gateway. The browser never receives
         // the upstream HMAC credentials; Laravel signs every request.
         Route::get('/hg/health', [HackerGuardianController::class, 'health']);
@@ -31,10 +40,8 @@ Route::prefix('v1')->group(function (): void {
             ->whereNumber('id')->whereNumber('seq');
         Route::get('/replays/{id}/world', [HackerGuardianController::class, 'replayWorld'])
             ->whereNumber('id');
-        Route::get('/replays/{id}/world/chunks/{x}/{z}', [HackerGuardianController::class, 'replayWorldChunk'])
-            ->whereNumber('id')
-            ->where('x', '-?[0-9]+')
-            ->where('z', '-?[0-9]+');
+        Route::get('/replays/{id}/world/chunks/{chunkX}/{chunkZ}', [HackerGuardianController::class, 'replayWorldChunk'])
+            ->whereNumber('id')->where('chunkX', '-?[0-9]+')->where('chunkZ', '-?[0-9]+');
 
         Route::get('/detection/status', [HackerGuardianController::class, 'detectionStatus']);
         Route::get('/detection/recent', [HackerGuardianController::class, 'detectionRecent']);
