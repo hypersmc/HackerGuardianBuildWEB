@@ -299,9 +299,17 @@ function EngineOverlay({ title, detail, error = false }: { title: string; detail
 
 function meshProgressText(progress: ReplayMeshProgress | null) {
   if (!progress) return 'Starting off-main-thread Minecraft mesh preparation…'
-  if (progress.phase === 'combining') return `Combining static world geometry · ${progress.revisions} dynamic revisions prepared`
-  if (progress.phase === 'hydrating') return `Preparing GPU buffers ${progress.completed}/${progress.total} · ${progress.revisions} dynamic revisions`
-  return `Meshing sections ${progress.completed}/${progress.total} · ${progress.revisions} dynamic revisions`
+  if (progress.detail) return progress.detail
+  switch (progress.phase) {
+    case 'starting': return 'Starting replay mesh worker…'
+    case 'transferring': return `Sending ${progress.total} compressed world sections to the worker…`
+    case 'catalog': return 'Loading Minecraft model catalog inside the worker…'
+    case 'decoding': return `Expanding recorded sections ${progress.completed}/${progress.total}`
+    case 'dynamic': return `Preparing block-event revisions ${progress.completed}/${progress.total}`
+    case 'meshing': return `Meshing recorded chunks ${progress.completed}/${progress.total}`
+    case 'combining': return `Combining static world geometry ${progress.completed}/${progress.total}`
+    case 'hydrating': return `Preparing GPU buffers ${progress.completed}/${progress.total}`
+  }
 }
 
 export function ReplayScene3D(props: Props) {
@@ -311,7 +319,7 @@ export function ReplayScene3D(props: Props) {
   const [meshError, setMeshError] = useState<string | null>(null)
   const [rendererError, setRendererError] = useState<string | null>(null)
   const [rendererReady, setRendererReady] = useState(false)
-  const catalog = props.assetPack?.catalog ?? null
+  const assetPackId = props.assetPack?.id ?? null
 
   useEffect(() => {
     let cancelled = false
@@ -327,7 +335,7 @@ export function ReplayScene3D(props: Props) {
   }, [props.readyToken])
 
   useEffect(() => {
-    if (!probe?.supported || !catalog) return
+    if (!probe?.supported || !assetPackId) return
     const controller = new AbortController()
     let ownedWorld: PreparedReplayMeshWorld | null = null
     let cancelled = false
@@ -339,7 +347,7 @@ export function ReplayScene3D(props: Props) {
     void preloadReplayMeshWorld(
       props.sections,
       props.eventsBySection,
-      catalog,
+      assetPackId,
       (progress) => {
         if (!cancelled) setMeshProgress(progress)
       },
@@ -360,7 +368,11 @@ export function ReplayScene3D(props: Props) {
       controller.abort()
       if (ownedWorld) disposeReplayMeshWorld(ownedWorld)
     }
-  }, [probe?.supported, catalog, props.sections, props.eventsBySection, props.readyToken])
+    // readyToken is the immutable replay/render-input identity. Depending directly
+    // on useQueries-derived array/Map identities can abort and restart the worker
+    // even when the evidence content itself has not changed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [probe?.supported, assetPackId, props.readyToken])
 
   if (!probe) return <EngineOverlay title="Checking WebGPU" detail="Probing for a hardware-accelerated WebGPU adapter…" />
   if (!probe.supported) return <EngineOverlay error title="WebGPU required" detail={probe.message} />

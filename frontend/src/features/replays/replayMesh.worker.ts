@@ -1,5 +1,11 @@
 import type { MinecraftAssetCatalog } from './minecraftAssets'
-import { buildMinecraftGeometry, type MinecraftGeometryGroup, type MinecraftRenderLayer } from './minecraftModels'
+import {
+  buildMinecraftGeometry,
+  createMinecraftGeometryCache,
+  type MinecraftGeometryCache,
+  type MinecraftGeometryGroup,
+  type MinecraftRenderLayer,
+} from './minecraftModels'
 import {
   applySectionAtTime,
   decodeSectionBlocks,
@@ -18,7 +24,7 @@ type BuildMessage = {
   type: 'build'
   sections: ReplayWorldSection[]
   eventsBySection: Array<[string, TimedReplayEvent[]]>
-  catalog: MinecraftAssetCatalog
+  packId: string
 }
 
 type StaticAccumulator = {
@@ -39,6 +45,12 @@ type StaticAccumulator = {
   maxX: number
   maxY: number
   maxZ: number
+}
+
+type DynamicInput = {
+  section: ReplayWorldSection
+  base: VoxelWorld
+  events: TimedReplayEvent[]
 }
 
 type WorkerScope = {
@@ -142,35 +154,44 @@ function finalizeStatic(accumulator: StaticAccumulator): SerializedReplayGeometr
   }
 }
 
-function revisionPlayheads(events: TimedReplayEvent[], anchor: number) {
+function revisionPlan(events: TimedReplayEvent[], anchor: number) {
   const times = new Set<number>([Math.max(0, anchor), 0])
   for (const event of events) times.add(Math.max(0, event.t))
-  return [...times].sort((a, b) => a - b)
+
+  const seen = new Set<string>()
+  const result: Array<{ playhead: number; revision: string }> = []
+  for (const playhead of [...times].sort((a, b) => a - b)) {
+    const revision = sectionWorldRevision(events, playhead, anchor)
+    if (seen.has(revision)) continue
+    seen.add(revision)
+    result.push({ playhead, revision })
+  }
+  return result
 }
 
 function buildDynamicSection(
-  section: ReplayWorldSection,
-  base: VoxelWorld,
-  events: TimedReplayEvent[],
+  input: DynamicInput,
   catalog: MinecraftAssetCatalog,
+  cache: MinecraftGeometryCache,
+  revisionOffset: number,
+  totalRevisions: number,
 ): SerializedDynamicReplaySection {
+  const { section, base, events } = input
   const revisions: Record<string, SerializedReplayGeometry[]> = {}
+  const plan = revisionPlan(events, section.anchorMs)
 
-  for (const playhead of revisionPlayheads(events, section.anchorMs)) {
-    const revision = sectionWorldRevision(events, playhead, section.anchorMs)
-    if (revisions[revision]) continue
-    const world = applySectionAtTime(base, events, playhead, section.anchorMs)
-    const groups = buildMinecraftGeometry(world, catalog)
-    revisions[revision] = groups.map((group) => {
-      const serialized = serializedGeometry(group)
-      group.geometry.dispose()
-      return serialized
+  for (let index = 0; index < plan.length; index++) {
+    const { playhead, revision } = plan[index]
+    progress({
+      phase: 'dynamic',
+      completed: revisionOffset + index,
+      total: totalRevisions,
+      revisions: revisionOffset + index,
+      detail: `Preparing block-event revision ${index + 1}/${plan.length} for ${section.key}`,
     })
-  }
-
-  if (!revisions.base) {
-    const groups = buildMinecraftGeometry(base, catalog)
-    revisions.base = groups.map((group) => {
+    const world = applySectionAtTime(base, events, playhead, section.anchorMs)
+    const groups = buildMinecraftGeometry(world, catalog, cache)
+    revisions[revision] = groups.map((group) => {
       const serialized = serializedGeometry(group)
       group.geometry.dispose()
       return serialized
@@ -213,31 +234,45 @@ function progress(value: ReplayMeshWorkerProgress) {
   scope.postMessage({ type: 'progress', progress: value })
 }
 
-scope.onmessage = (event) => {
-  if (event.data.type !== 'build') return
+async function loadCatalog(packId: string): Promise<MinecraftAssetCatalog> {
+  progress({ phase: 'catalog', completed: 0, total: 1, revisions: 0, detail: `Loading Minecraft render catalog ${packId} inside mesh worker` })
+  const response = await fetch(`/api/v1/replay-assets/${encodeURIComponent(packId)}/catalog`, {
+    credentials: 'same-origin',
+    headers: { Accept: 'application/json' },
+  })
+  const body = await response.json().catch(() => null) as {
+    data?: { catalog?: MinecraftAssetCatalog }
+    message?: string
+  } | null
 
+  if (!response.ok) throw new Error(body?.message ?? `Minecraft render catalog request failed with HTTP ${response.status}.`)
+  const catalog = body?.data?.catalog
+  if (!catalog) throw new Error(`Minecraft render catalog ${packId} did not contain a catalog payload.`)
+  progress({ phase: 'catalog', completed: 1, total: 1, revisions: 0, detail: `Minecraft render catalog ${packId} ready` })
+  return catalog
+}
+
+async function build(message: BuildMessage) {
   try {
-    const { sections, catalog } = event.data
-    const eventsBySection = new Map(event.data.eventsBySection)
+    const { sections, packId } = message
+    const catalog = await loadCatalog(packId)
+    const cache = createMinecraftGeometryCache(catalog)
+    const eventsBySection = new Map(message.eventsBySection)
     const staticGeometryGroups = new Map<string, StaticAccumulator>()
     const staticChunks = new Map<string, VoxelWorld>()
+    const dynamicInputs: DynamicInput[] = []
     const dynamicSections: SerializedDynamicReplaySection[] = []
-    const staticChunkKeys = new Set(
-      sections
-        .filter((section) => (eventsBySection.get(section.key)?.length ?? 0) === 0)
-        .map(chunkKey),
-    )
-    const totalUnits = sections.length + staticChunkKeys.size
-    let completedUnits = 0
     let staticSectionCount = 0
-    let dynamicSectionCount = 0
-    let revisionCount = 0
 
-    // First expand every section in the worker. Event-free sections are retained in
-    // chunk-sized worlds so model resolution/culling happens once per chunk rather
-    // than once per vertical 16x16x16 section. Eventful sections remain independent
-    // because playback swaps their precomputed revisions by timestamp.
-    for (const section of sections) {
+    for (let index = 0; index < sections.length; index++) {
+      const section = sections[index]
+      progress({
+        phase: 'decoding',
+        completed: index,
+        total: sections.length,
+        revisions: 0,
+        detail: `Expanding recorded section ${index + 1}/${sections.length}`,
+      })
       const events = eventsBySection.get(section.key) ?? []
       const base = decodeSectionBlocks(section)
       if (events.length === 0) {
@@ -247,32 +282,76 @@ scope.onmessage = (event) => {
         staticChunks.set(key, chunk)
         staticSectionCount++
       } else {
-        const dynamic = buildDynamicSection(section, base, events, catalog)
-        revisionCount += Object.keys(dynamic.revisions).length
-        dynamicSections.push(dynamic)
-        dynamicSectionCount++
+        dynamicInputs.push({ section, base, events })
       }
+    }
+    progress({ phase: 'decoding', completed: sections.length, total: sections.length, revisions: 0, detail: `${sections.length} recorded sections expanded` })
 
-      completedUnits++
-      progress({ phase: 'meshing', completed: completedUnits, total: totalUnits, revisions: revisionCount })
+    const totalRevisions = dynamicInputs.reduce((sum, input) => sum + revisionPlan(input.events, input.section.anchorMs).length, 0)
+    let revisionCount = 0
+    for (const input of dynamicInputs) {
+      const dynamic = buildDynamicSection(input, catalog, cache, revisionCount, totalRevisions)
+      revisionCount += Object.keys(dynamic.revisions).length
+      dynamicSections.push(dynamic)
+      progress({
+        phase: 'dynamic',
+        completed: revisionCount,
+        total: totalRevisions,
+        revisions: revisionCount,
+        detail: `${revisionCount}/${totalRevisions} block-event revisions prepared`,
+      })
     }
 
-    // Static chunk meshing is substantially cheaper than section-by-section model
-    // resolution and also removes hidden faces between adjacent static Y sections.
-    for (const world of staticChunks.values()) {
-      appendStatic(staticGeometryGroups, buildMinecraftGeometry(world, catalog))
-      completedUnits++
-      progress({ phase: 'meshing', completed: completedUnits, total: totalUnits, revisions: revisionCount })
+    const staticEntries = [...staticChunks.entries()]
+    for (let index = 0; index < staticEntries.length; index++) {
+      const [key, world] = staticEntries[index]
+      progress({
+        phase: 'meshing',
+        completed: index,
+        total: staticEntries.length,
+        revisions: revisionCount,
+        detail: `Meshing recorded chunk ${index + 1}/${staticEntries.length} · ${key}`,
+      })
+      appendStatic(staticGeometryGroups, buildMinecraftGeometry(world, catalog, cache))
     }
+    progress({
+      phase: 'meshing',
+      completed: staticEntries.length,
+      total: staticEntries.length,
+      revisions: revisionCount,
+      detail: `${staticEntries.length} static chunks meshed`,
+    })
 
-    progress({ phase: 'combining', completed: totalUnits, total: totalUnits, revisions: revisionCount })
+    progress({
+      phase: 'combining',
+      completed: 0,
+      total: staticGeometryGroups.size,
+      revisions: revisionCount,
+      detail: `Combining ${staticGeometryGroups.size} texture/render groups`,
+    })
+
+    const staticGroups: SerializedReplayGeometry[] = []
+    let combined = 0
+    for (const accumulator of staticGeometryGroups.values()) {
+      staticGroups.push(finalizeStatic(accumulator))
+      combined++
+      if (combined % 8 === 0 || combined === staticGeometryGroups.size) {
+        progress({
+          phase: 'combining',
+          completed: combined,
+          total: staticGeometryGroups.size,
+          revisions: revisionCount,
+          detail: `Combining static geometry ${combined}/${staticGeometryGroups.size}`,
+        })
+      }
+    }
 
     const result: SerializedReplayMeshWorld = {
-      staticGroups: [...staticGeometryGroups.values()].map(finalizeStatic),
+      staticGroups,
       dynamicSections,
       sectionCount: sections.length,
       staticSectionCount,
-      dynamicSectionCount,
+      dynamicSectionCount: dynamicInputs.length,
       revisionCount,
     }
 
@@ -281,3 +360,10 @@ scope.onmessage = (event) => {
     scope.postMessage({ type: 'error', message: error instanceof Error ? error.message : String(error) })
   }
 }
+
+scope.onmessage = (event) => {
+  if (event.data.type !== 'build') return
+  void build(event.data)
+}
+
+scope.postMessage({ type: 'ready' })

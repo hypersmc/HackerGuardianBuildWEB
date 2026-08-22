@@ -1,15 +1,15 @@
 import { BufferGeometry, Float32BufferAttribute, Sphere, Vector3 } from 'three'
-import type { MinecraftAssetCatalog } from './minecraftAssets'
 import type { MinecraftRenderLayer } from './minecraftModels'
 import type { ReplayWorldSection } from './replaySections'
 import type { ReplayMeshWorkerProgress, SerializedReplayGeometry, SerializedReplayMeshWorld } from './replayMeshTypes'
 import type { TimedReplayEvent } from './voxel'
 
-export type ReplayMeshProgress = {
-  phase: 'meshing' | 'combining' | 'hydrating'
+export type ReplayMeshProgress = ReplayMeshWorkerProgress | {
+  phase: 'hydrating'
   completed: number
   total: number
   revisions: number
+  detail?: string
 }
 
 export type PreparedReplayGeometry = {
@@ -36,6 +36,7 @@ export type PreparedReplayMeshWorld = {
 }
 
 type WorkerResponse =
+  | { type: 'ready' }
   | { type: 'progress'; progress: ReplayMeshWorkerProgress }
   | { type: 'result'; result: SerializedReplayMeshWorld }
   | { type: 'error'; message: string }
@@ -70,8 +71,14 @@ async function hydrateWorld(serialized: SerializedReplayMeshWorld, onProgress?: 
     for (const group of groups) {
       result.push(hydrateGeometry(group))
       completed++
-      if (completed % 24 === 0) {
-        onProgress?.({ phase: 'hydrating', completed, total, revisions: serialized.revisionCount })
+      if (completed % 16 === 0) {
+        onProgress?.({
+          phase: 'hydrating',
+          completed,
+          total,
+          revisions: serialized.revisionCount,
+          detail: `Creating GPU-ready buffers ${completed}/${total}`,
+        })
         await browserYield()
       }
     }
@@ -86,7 +93,13 @@ async function hydrateWorld(serialized: SerializedReplayMeshWorld, onProgress?: 
     dynamicSections.push({ key: section.key, anchorMs: section.anchorMs, events: section.events, revisions })
   }
 
-  onProgress?.({ phase: 'hydrating', completed: total, total, revisions: serialized.revisionCount })
+  onProgress?.({
+    phase: 'hydrating',
+    completed: total,
+    total,
+    revisions: serialized.revisionCount,
+    detail: `${total} GPU geometry groups ready`,
+  })
   return {
     staticGroups,
     dynamicSections,
@@ -100,39 +113,88 @@ async function hydrateWorld(serialized: SerializedReplayMeshWorld, onProgress?: 
 export async function preloadReplayMeshWorld(
   sections: ReplayWorldSection[],
   eventsBySection: ReadonlyMap<string, TimedReplayEvent[]>,
-  catalog: MinecraftAssetCatalog,
+  packId: string,
   onProgress?: (progress: ReplayMeshProgress) => void,
   signal?: AbortSignal,
 ): Promise<PreparedReplayMeshWorld> {
   if (signal?.aborted) throw new Error('Replay mesh preload aborted.')
+  onProgress?.({
+    phase: 'starting',
+    completed: 0,
+    total: 1,
+    revisions: 0,
+    detail: 'Starting replay mesh worker',
+  })
+
   const worker = new Worker(new URL('./replayMesh.worker.ts', import.meta.url), { type: 'module' })
 
   const serialized = await new Promise<SerializedReplayMeshWorld>((resolve, reject) => {
-    const abort = () => {
+    let settled = false
+    let buildSent = false
+    const bootTimeout = window.setTimeout(() => {
+      if (settled || buildSent) return
+      settled = true
       worker.terminate()
-      reject(new Error('Replay mesh preload aborted.'))
+      reject(new Error('Replay mesh worker did not start within 15 seconds. Check the browser console for worker/module errors.'))
+    }, 15_000)
+
+    const cleanup = () => {
+      window.clearTimeout(bootTimeout)
+      signal?.removeEventListener('abort', abort)
     }
+
+    const fail = (error: Error) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      worker.terminate()
+      reject(error)
+    }
+
+    const abort = () => fail(new Error('Replay mesh preload aborted.'))
     signal?.addEventListener('abort', abort, { once: true })
 
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       const message = event.data
+      if (message.type === 'ready') {
+        if (buildSent || settled) return
+        buildSent = true
+        window.clearTimeout(bootTimeout)
+        onProgress?.({
+          phase: 'transferring',
+          completed: 0,
+          total: sections.length,
+          revisions: 0,
+          detail: `Sending ${sections.length} compressed replay sections to worker`,
+        })
+        try {
+          worker.postMessage({
+            type: 'build',
+            sections,
+            eventsBySection: [...eventsBySection.entries()],
+            packId,
+          })
+        } catch (error) {
+          fail(error instanceof Error ? error : new Error(String(error)))
+        }
+        return
+      }
+
       if (message.type === 'progress') {
         onProgress?.(message.progress)
         return
       }
-      signal?.removeEventListener('abort', abort)
+
+      if (settled) return
+      settled = true
+      cleanup()
       worker.terminate()
       if (message.type === 'error') reject(new Error(message.message))
       else resolve(message.result)
     }
 
-    worker.onerror = (event) => {
-      signal?.removeEventListener('abort', abort)
-      worker.terminate()
-      reject(new Error(event.message || 'Replay mesh worker failed.'))
-    }
-
-    worker.postMessage({ type: 'build', sections, eventsBySection: [...eventsBySection.entries()], catalog })
+    worker.onerror = (event) => fail(new Error(event.message || 'Replay mesh worker failed.'))
+    worker.onmessageerror = () => fail(new Error('Replay mesh worker returned data that the browser could not deserialize.'))
   })
 
   if (signal?.aborted) throw new Error('Replay mesh preload aborted.')

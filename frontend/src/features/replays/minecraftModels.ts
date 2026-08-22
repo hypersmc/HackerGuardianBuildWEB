@@ -41,6 +41,12 @@ type BlockState = {
   properties: Record<string, string>
 }
 
+export type MinecraftGeometryCache = {
+  textureSet: Set<string>
+  modelCache: Map<string, ResolvedModel | null>
+  stateCache: Map<string, BlockState>
+}
+
 const DIRECTIONS: Record<Direction, [number, number, number]> = {
   north: [0, 0, -1],
   south: [0, 0, 1],
@@ -52,15 +58,29 @@ const DIRECTIONS: Record<Direction, [number, number, number]> = {
 
 const TRIANGLES = [0, 1, 2, 0, 2, 3] as const
 
-export function buildMinecraftGeometry(world: VoxelWorld, catalog: MinecraftAssetCatalog): MinecraftGeometryGroup[] {
-  const textureSet = new Set(catalog.textures ?? [])
+export function createMinecraftGeometryCache(catalog: MinecraftAssetCatalog): MinecraftGeometryCache {
+  return {
+    textureSet: new Set(catalog.textures ?? []),
+    modelCache: new Map<string, ResolvedModel | null>(),
+    stateCache: new Map<string, BlockState>(),
+  }
+}
+
+export function buildMinecraftGeometry(
+  world: VoxelWorld,
+  catalog: MinecraftAssetCatalog,
+  cache: MinecraftGeometryCache = createMinecraftGeometryCache(catalog),
+): MinecraftGeometryGroup[] {
   const groups = new Map<string, { texture: string | null; layer: MinecraftRenderLayer; buffers: Buffers }>()
-  const modelCache = new Map<string, ResolvedModel | null>()
 
   for (const [key, rawState] of world) {
     const [x, y, z] = key.split(',').map(Number)
     if (![x, y, z].every(Number.isFinite)) continue
-    const state = parseBlockState(rawState)
+    let state = cache.stateCache.get(rawState)
+    if (!state) {
+      state = parseBlockState(rawState)
+      cache.stateCache.set(rawState, state)
+    }
     if (isAir(state.id)) continue
 
     const definition = catalog.blockstates[state.id]
@@ -73,9 +93,9 @@ export function buildMinecraftGeometry(world: VoxelWorld, catalog: MinecraftAsse
     let rendered = false
     for (const apply of applies) {
       const modelId = normalizeResource(apply.model)
-      const model = resolveModel(catalog, modelId, modelCache, new Set())
+      const model = resolveModel(catalog, modelId, cache.modelCache, new Set())
       if (!model || model.elements.length === 0) continue
-      appendModel(groups, world, textureSet, state, x, y, z, model, apply)
+      appendModel(groups, world, cache.textureSet, state, x, y, z, model, apply)
       rendered = true
     }
 
