@@ -1,19 +1,65 @@
-import { useEffect, useMemo } from 'react'
+import { memo, useEffect, useMemo } from 'react'
 import type { Texture } from 'three'
 import type { MinecraftAssetCatalog } from './minecraftAssets'
 import { buildMinecraftGeometry } from './minecraftModels'
-import type { VoxelWorld } from './voxel'
+import {
+  applySectionAtTime,
+  sectionWorldRevision,
+  type ReplayWorldSection,
+} from './replaySections'
+import type { TimedReplayEvent } from './voxel'
 
 type Origin = { x: number; y: number; z: number }
 
 type Props = {
-  world: VoxelWorld
+  sections: ReplayWorldSection[]
+  eventsBySection: ReadonlyMap<string, TimedReplayEvent[]>
+  playhead: number
   origin: Origin
   catalog: MinecraftAssetCatalog
   textures: ReadonlyMap<string, Texture>
 }
 
-export function MinecraftWorldMesh({ world, origin, catalog, textures }: Props) {
+const NO_EVENTS: TimedReplayEvent[] = []
+
+export const MinecraftWorldMesh = memo(function MinecraftWorldMesh({ sections, eventsBySection, playhead, origin, catalog, textures }: Props) {
+  return (
+    <group position={[-origin.x, -origin.y, -origin.z]}>
+      {sections.map((section) => (
+        <MinecraftSectionMesh
+          key={section.key}
+          section={section}
+          events={eventsBySection.get(section.key) ?? NO_EVENTS}
+          playhead={playhead}
+          catalog={catalog}
+          textures={textures}
+        />
+      ))}
+    </group>
+  )
+})
+
+function MinecraftSectionMesh({
+  section,
+  events,
+  playhead,
+  catalog,
+  textures,
+}: {
+  section: ReplayWorldSection
+  events: TimedReplayEvent[]
+  playhead: number
+  catalog: MinecraftAssetCatalog
+  textures: ReadonlyMap<string, Texture>
+}) {
+  const revision = sectionWorldRevision(events, playhead, section.anchorMs)
+  const world = useMemo(
+    () => applySectionAtTime(section.blocks, events, playhead, section.anchorMs),
+    // playhead intentionally does not participate directly: a section is rebuilt
+    // only when its visible block-event revision changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [section.blocks, events, section.anchorMs, revision],
+  )
   const groups = useMemo(() => buildMinecraftGeometry(world, catalog), [world, catalog])
 
   useEffect(() => () => {
@@ -21,15 +67,13 @@ export function MinecraftWorldMesh({ world, origin, catalog, textures }: Props) 
   }, [groups])
 
   return (
-    <group position={[-origin.x, -origin.y, -origin.z]}>
+    <group>
       {groups.map((group) => {
         const texture = group.texture ? textures.get(group.texture) : null
         return (
           <mesh
             key={group.key}
             geometry={group.geometry}
-            receiveShadow
-            castShadow={group.layer !== 'translucent'}
             renderOrder={group.layer === 'translucent' ? 2 : group.layer === 'cutout' ? 1 : 0}
           >
             <meshStandardMaterial

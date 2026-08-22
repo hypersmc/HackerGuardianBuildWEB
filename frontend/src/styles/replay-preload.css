@@ -130,6 +130,39 @@
   background: rgba(127, 38, 52, .13);
 }
 
+.replay-preload__pack-picker {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #15222b;
+  background: #0a141b;
+}
+
+.replay-preload__pack-picker label {
+  color: #a8b8c4;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.replay-preload__pack-picker select {
+  min-width: 0;
+  height: 32px;
+  border: 1px solid #314654;
+  border-radius: 2px;
+  background: #071017;
+  color: #b9c8d2;
+  padding: 0 8px;
+  font: 9px/1 var(--mono);
+}
+
+.replay-preload__pack-picker small {
+  grid-column: 1 / -1;
+  color: #667b8a;
+  font: 8px/1.5 var(--mono);
+}
+
 .replay-preload code {
   display: block;
   margin: 14px 16px 16px;
@@ -158,5 +191,14 @@
   .replay-preload__row {
     grid-template-columns: 110px 68px minmax(0, 1fr);
     padding: 0 10px;
+  }
+
+  .replay-preload__pack-picker {
+    grid-template-columns: 1fr;
+    padding: 12px 10px;
+  }
+
+  .replay-preload__pack-picker small {
+    grid-column: auto;
   }
 }

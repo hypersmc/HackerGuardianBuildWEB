@@ -1,9 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { replayApi } from '../features/replays/api'
-import { minecraftAssetApi } from '../features/replays/minecraftAssets'
+import { minecraftAssetApi, type MinecraftAssetManifest } from '../features/replays/minecraftAssets'
 import { ReplayScene3D } from '../features/replays/ReplayScene3D'
 import { collectReplayTextureAssets, loadReplayTextures } from '../features/replays/replayPreload'
+import {
+  collectRecordedBlockStates,
+  countRecordedBlocks,
+  decodeReplayWorldSections,
+  indexBlockEventsBySection,
+} from '../features/replays/replaySections'
 import type {
   CameraMode,
   PlayerSample,
@@ -11,13 +17,7 @@ import type {
   ReplayPlayerFrame,
   WorldChunkData,
 } from '../features/replays/types'
-import {
-  applyWorldAtTime,
-  expandWorldChunkAnchors,
-  expandWorldChunks,
-  flattenEvents,
-  worldEventRevision,
-} from '../features/replays/voxel'
+import { flattenEvents } from '../features/replays/voxel'
 import '../styles/replay3d.css'
 import '../styles/replay-preload.css'
 
@@ -97,9 +97,26 @@ function eventLabel(event: ReplayEvent & { t?: number }) {
 
 type GateState = 'waiting' | 'loading' | 'ready' | 'degraded' | 'error'
 type GateRow = { label: string; state: GateState; detail: string }
+type PackSource = 'recorded' | 'manual' | 'inferred' | 'none'
 
-function ReplayLoadGate({ rows, progress, packId }: { rows: GateRow[]; progress: number; packId: string | null }) {
+function ReplayLoadGate({
+  rows,
+  progress,
+  packId,
+  recordedPackId,
+  packs,
+  onPackSelect,
+}: {
+  rows: GateRow[]
+  progress: number
+  packId: string | null
+  recordedPackId: string | null
+  packs: MinecraftAssetManifest[]
+  onPackSelect: (id: string | null) => void
+}) {
   const failed = rows.some((row) => row.state === 'error')
+  const canChooseLegacyPack = !recordedPackId && packs.length > 0
+
   return (
     <div className={`replay-preload${failed ? ' replay-preload--error' : ''}`}>
       <div className="replay-preload__card">
@@ -120,8 +137,24 @@ function ReplayLoadGate({ rows, progress, packId }: { rows: GateRow[]; progress:
             </div>
           ))}
         </div>
+        {canChooseLegacyPack && (
+          <div className="replay-preload__pack-picker">
+            <label htmlFor="legacy-replay-pack">Legacy replay render pack</label>
+            <select
+              id="legacy-replay-pack"
+              value={packId ?? ''}
+              onChange={(event) => onPackSelect(event.target.value || null)}
+            >
+              <option value="">Select imported Minecraft assets…</option>
+              {packs.map((pack) => (
+                <option key={pack.id} value={pack.id}>{pack.id} · Minecraft {pack.version}</option>
+              ))}
+            </select>
+            <small>This replay did not record a Minecraft/render-pack id. Choosing one here is an explicit render-only override and does not alter replay evidence.</small>
+          </div>
+        )}
         {failed && packId && rows.some((row) => row.label === 'Render pack' && row.state === 'error') && (
-          <code>php artisan hg:assets:import &lt;minecraft-client.jar&gt; --id={packId} --version={packId}</code>
+          <code>php artisan hg:assets:import &lt;minecraft-client.jar&gt; --id={packId} --minecraft-version={packId}</code>
         )}
       </div>
     </div>
@@ -130,6 +163,7 @@ function ReplayLoadGate({ rows, progress, packId }: { rows: GateRow[]; progress:
 
 export function Replay3DPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null)
+  const [manualPackId, setManualPackId] = useState<string | null>(null)
   const [playhead, setPlayhead] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [speed, setSpeed] = useState(1)
@@ -145,10 +179,24 @@ export function Replay3DPage() {
     refetchInterval: 30_000,
   })
 
+  const assetPacksQuery = useQuery({
+    queryKey: ['minecraft-assets', 'packs'],
+    queryFn: () => minecraftAssetApi.list(),
+    staleTime: Infinity,
+    retry: false,
+  })
+
   useEffect(() => {
     if (selectedId !== null || !list.data?.replays.length) return
     setSelectedId(list.data.replays[0].id)
   }, [list.data, selectedId])
+
+  useEffect(() => {
+    setManualPackId(null)
+    if (selectedId === null) return
+    const stored = window.localStorage.getItem(`hg.replay.render-pack.${selectedId}`)
+    if (stored) setManualPackId(stored)
+  }, [selectedId])
 
   const manifest = useQuery({
     queryKey: ['replay', selectedId, 'manifest'],
@@ -157,7 +205,20 @@ export function Replay3DPage() {
   })
 
   const worldContext = manifest.data?.world_snapshot?.context
-  const assetPackId = worldContext?.resource_pack_id || worldContext?.minecraft_version || null
+  const recordedPackId = worldContext?.resource_pack_id || worldContext?.minecraft_version || null
+  const installedPacks = assetPacksQuery.data?.packs ?? []
+  const inferredPackId = !recordedPackId && !manualPackId && assetPacksQuery.isSuccess && installedPacks.length === 1
+    ? installedPacks[0].id
+    : null
+  const assetPackId = manualPackId || recordedPackId || inferredPackId
+  const packSource: PackSource = manualPackId
+    ? 'manual'
+    : recordedPackId
+      ? 'recorded'
+      : inferredPackId
+        ? 'inferred'
+        : 'none'
+
   const assetPackQuery = useQuery({
     queryKey: ['minecraft-assets', assetPackId],
     queryFn: () => minecraftAssetApi.catalog(assetPackId as string),
@@ -195,8 +256,6 @@ export function Replay3DPage() {
     .map((query) => query.data)
     .filter((chunk): chunk is WorldChunkData => Boolean(chunk)), [worldChunkQueries])
 
-  const baseWorld = useMemo(() => expandWorldChunks(loadedWorldChunks), [loadedWorldChunks])
-  const worldAnchors = useMemo(() => expandWorldChunkAnchors(loadedWorldChunks), [loadedWorldChunks])
   const events = useMemo(() => flattenEvents(frames), [frames])
 
   const replayChunksTotal = manifest.data?.chunks.length ?? 0
@@ -218,15 +277,30 @@ export function Replay3DPage() {
     || (worldChunksTotal > 0 && worldChunksLoaded === worldChunksTotal && !worldChunksFailed)
   )
 
+  const worldSections = useMemo(
+    () => allWorldChunksLoaded ? decodeReplayWorldSections(loadedWorldChunks) : [],
+    [allWorldChunksLoaded, loadedWorldChunks],
+  )
+  const defaultWorld = manifest.data?.world?.name || worldContext?.world || loadedWorldChunks[0]?.world || 'world'
+  const eventsBySection = useMemo(
+    () => indexBlockEventsBySection(events, defaultWorld),
+    [events, defaultWorld],
+  )
+
   const replayBlockStates = useMemo(() => {
-    const states = new Set<string>()
-    for (const state of baseWorld.values()) states.add(state)
+    if (!allWorldChunksLoaded) return new Set<string>()
+    const states = collectRecordedBlockStates(loadedWorldChunks)
     for (const event of events) {
       if (typeof event.block === 'string') states.add(event.block)
       if (typeof event.previous_block === 'string') states.add(event.previous_block)
     }
     return states
-  }, [baseWorld, events])
+  }, [allWorldChunksLoaded, loadedWorldChunks, events])
+
+  const recordedBlockCount = useMemo(
+    () => allWorldChunksLoaded ? countRecordedBlocks(loadedWorldChunks) : 0,
+    [allWorldChunksLoaded, loadedWorldChunks],
+  )
 
   const requiredTextureAssets = useMemo(() => {
     if (!assetPackQuery.data || !allReplayChunksLoaded || !allWorldChunksLoaded) return []
@@ -288,26 +362,75 @@ export function Replay3DPage() {
     frames.at(-1)?.t ?? 0,
   )
 
-  const assetReady = !assetPackId || (assetPackQuery.isSuccess && textureQuery.isSuccess)
+  const blockEventRevision = useMemo(() => {
+    let revision = 0
+    for (const event of events) {
+      if ((event.type === 'BLOCK_BREAK' || event.type === 'BLOCK_PLACE') && event.t <= playhead) revision++
+    }
+    return revision
+  }, [events, playhead])
+  // World geometry only changes on a block-event boundary. Keeping a stable world
+  // playhead between those boundaries lets the complete section-mesh subtree stay
+  // memoized while players/camera continue at normal replay frame rate.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const worldPlayhead = useMemo(() => playhead, [selectedId, blockEventRevision])
+
+  const packChoiceRequired = Boolean(
+    manifest.isSuccess
+    && worldSnapshotAvailable
+    && !recordedPackId
+    && assetPacksQuery.isSuccess
+    && installedPacks.length > 1
+    && !manualPackId,
+  )
+  const noRenderPackAvailable = assetPacksQuery.isSuccess && installedPacks.length === 0
+  const packDiscoveryReady = Boolean(recordedPackId) || assetPacksQuery.isSuccess
+  const assetReady = packDiscoveryReady
+    && !packChoiceRequired
+    && (assetPackId ? assetPackQuery.isSuccess && textureQuery.isSuccess : noRenderPackAvailable || !worldSnapshotAvailable)
   const dataReady = manifest.isSuccess && allReplayChunksLoaded && allWorldChunksLoaded && assetReady
   const canStart = dataReady && sceneReady
   const assetPack = assetPackQuery.data && assetPackId && textureQuery.data
     ? { id: assetPackId, catalog: assetPackQuery.data.catalog, textures: textureQuery.data }
     : null
-  const sceneToken = `${selectedId ?? 'none'}:${assetPackId ?? 'fallback'}:${frames.length}:${loadedWorldChunks.length}:${requiredTextureAssets.length}`
-
-  const anchor = manifest.data?.world_snapshot?.anchor_ms ?? manifest.data?.trigger_offset_ms ?? 0
-  const revision = worldEventRevision(events, playhead, anchor, worldAnchors)
-  const world = useMemo(
-    () => applyWorldAtTime(baseWorld, events, playhead, anchor, worldAnchors),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [baseWorld, events, anchor, worldAnchors, revision],
-  )
+  const sceneToken = `${selectedId ?? 'none'}:${assetPackId ?? 'fallback'}:${frames.length}:${worldSections.length}:${requiredTextureAssets.length}`
 
   const currentEvents = useMemo(() => events.filter((event) => Math.abs(event.t - playhead) <= 650).slice(-12), [events, playhead])
   const triggerOffset = manifest.data?.trigger_offset_ms ?? 0
   const triggerPercent = duration > 0 ? clamp((triggerOffset / duration) * 100, 0, 100) : 0
   const texturesLoaded = textureQuery.isSuccess ? requiredTextureAssets.length : textureProgress.loaded
+
+  const renderPackRow: GateRow = !manifest.isSuccess
+    ? { label: 'Render pack', state: 'waiting', detail: 'waiting for replay metadata' }
+    : !worldSnapshotAvailable
+      ? { label: 'Render pack', state: 'degraded', detail: 'world snapshot not recorded' }
+      : assetPacksQuery.isError && !recordedPackId
+        ? { label: 'Render pack', state: 'error', detail: 'could not read locally imported render packs' }
+        : packChoiceRequired
+          ? { label: 'Render pack', state: 'waiting', detail: `legacy replay; choose one of ${installedPacks.length} imported packs` }
+          : !assetPackId
+            ? assetPacksQuery.isLoading
+              ? { label: 'Render pack', state: 'loading', detail: 'checking locally imported Minecraft assets' }
+              : { label: 'Render pack', state: 'degraded', detail: 'no imported render pack is available' }
+            : assetPackQuery.isError
+              ? { label: 'Render pack', state: 'error', detail: `${assetPackId} is not installed` }
+              : assetPackQuery.isSuccess
+                ? { label: 'Render pack', state: packSource === 'inferred' ? 'degraded' : 'ready', detail: `${assetPackId} · ${packSource}` }
+                : { label: 'Render pack', state: 'loading', detail: `loading ${assetPackId}` }
+
+  const textureRow: GateRow = !worldSnapshotAvailable
+    ? { label: 'Textures', state: 'degraded', detail: 'no world geometry to texture' }
+    : packChoiceRequired
+      ? { label: 'Textures', state: 'waiting', detail: 'waiting for render-pack selection' }
+      : !assetPackId
+        ? { label: 'Textures', state: noRenderPackAvailable ? 'degraded' : 'waiting', detail: noRenderPackAvailable ? 'diagnostic renderer only' : 'waiting for render pack' }
+        : textureQuery.isError
+          ? { label: 'Textures', state: 'error', detail: 'one or more replay textures failed to decode' }
+          : textureQuery.isSuccess
+            ? { label: 'Textures', state: 'ready', detail: `${requiredTextureAssets.length}/${requiredTextureAssets.length} decoded` }
+            : assetPackQuery.isSuccess
+              ? { label: 'Textures', state: 'loading', detail: `${texturesLoaded}/${requiredTextureAssets.length} decoded` }
+              : { label: 'Textures', state: 'waiting', detail: 'waiting for render pack' }
 
   const preloadRows: GateRow[] = [
     {
@@ -325,20 +448,12 @@ export function Replay3DPage() {
       state: worldManifestInvalid || worldChunksFailed ? 'error' : !worldSnapshotAvailable && manifest.isSuccess ? 'degraded' : allWorldChunksLoaded ? 'ready' : manifest.isSuccess ? 'loading' : 'waiting',
       detail: !worldSnapshotAvailable && manifest.isSuccess ? 'not recorded; world reconstruction unavailable' : `${worldChunksLoaded}/${worldChunksTotal} full chunks`,
     },
-    {
-      label: 'Render pack',
-      state: !manifest.isSuccess ? 'waiting' : !assetPackId ? 'degraded' : assetPackQuery.isError ? 'error' : assetPackQuery.isSuccess ? 'ready' : 'loading',
-      detail: !assetPackId ? 'not recorded; diagnostic renderer only' : assetPackQuery.isSuccess ? assetPackId : assetPackQuery.isError ? `${assetPackId} is not installed` : `loading ${assetPackId}`,
-    },
-    {
-      label: 'Textures',
-      state: !assetPackId && manifest.isSuccess ? 'degraded' : textureQuery.isError ? 'error' : textureQuery.isSuccess ? 'ready' : assetPackQuery.isSuccess ? 'loading' : 'waiting',
-      detail: !assetPackId ? 'no render pack selected' : textureQuery.isSuccess ? `${requiredTextureAssets.length}/${requiredTextureAssets.length} decoded` : `${texturesLoaded}/${requiredTextureAssets.length} decoded`,
-    },
+    renderPackRow,
+    textureRow,
     {
       label: 'GPU scene',
       state: sceneReady ? 'ready' : dataReady ? 'loading' : 'waiting',
-      detail: sceneReady ? 'initial frame rendered' : dataReady ? 'building geometry and compiling first frame' : 'waiting for replay data/assets',
+      detail: sceneReady ? `${worldSections.length} section meshes compiled` : dataReady ? 'building section meshes and compiling shaders' : 'waiting for replay data/assets',
     },
   ]
 
@@ -372,7 +487,9 @@ export function Replay3DPage() {
     let previous = performance.now()
 
     const tick = (now: number) => {
-      const elapsed = now - previous
+      // Evidence playback must not jump forward by the duration of a browser/main-
+      // thread stall. If a frame is delayed, slow the replay instead of skipping it.
+      const elapsed = Math.min(100, Math.max(0, now - previous))
       previous = now
       setPlayhead((current) => {
         const next = current + elapsed * speed
@@ -406,6 +523,14 @@ export function Replay3DPage() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [canStart, duration])
+
+  function setLegacyPack(id: string | null) {
+    setManualPackId(id)
+    if (selectedId === null) return
+    const key = `hg.replay.render-pack.${selectedId}`
+    if (id) window.localStorage.setItem(key, id)
+    else window.localStorage.removeItem(key)
+  }
 
   async function fullscreen() {
     if (!stageRef.current) return
@@ -452,7 +577,9 @@ export function Replay3DPage() {
             {manifest.isError && <div className="replay3d-stage-overlay replay3d-stage-overlay--error">Replay could not be loaded.</div>}
             {manifest.data && dataReady && (
               <ReplayScene3D
-                world={world}
+                sections={worldSections}
+                eventsBySection={eventsBySection}
+                playhead={worldPlayhead}
                 players={players}
                 subject={subject}
                 origin={origin}
@@ -473,14 +600,21 @@ export function Replay3DPage() {
                   <span>{subject ? `${subject.position.x.toFixed(2)} ${subject.position.y.toFixed(2)} ${subject.position.z.toFixed(2)}` : 'waiting for frames'}</span>
                 </div>
                 <div className="replay3d-hud replay3d-hud--bottom">
-                  <span>{worldSnapshotAvailable ? `${loadedWorldChunks.length}/${worldChunksTotal} chunk keyframes loaded` : 'world snapshot unavailable'}</span>
+                  <span>{worldSnapshotAvailable ? `${loadedWorldChunks.length}/${worldChunksTotal} chunks · ${worldSections.length} sections` : 'world snapshot unavailable'}</span>
                   <span>{requiredTextureAssets.length.toLocaleString()} replay textures resident</span>
-                  <span>{world.size.toLocaleString()} recorded blocks</span>
+                  <span>{recordedBlockCount.toLocaleString()} recorded blocks</span>
                 </div>
               </>
             )}
             {manifest.data && !canStart && (
-              <ReplayLoadGate rows={preloadRows} progress={preloadProgress} packId={assetPackId} />
+              <ReplayLoadGate
+                rows={preloadRows}
+                progress={preloadProgress}
+                packId={assetPackId}
+                recordedPackId={recordedPackId}
+                packs={installedPacks}
+                onPackSelect={setLegacyPack}
+              />
             )}
           </div>
 
@@ -531,6 +665,17 @@ export function Replay3DPage() {
             <button className="replay3d-wide-button" type="button" onClick={fullscreen} disabled={!dataReady}>Fullscreen scene</button>
           </section>
 
+          {!recordedPackId && installedPacks.length > 0 && (
+            <section className="replay3d-inspector-section replay3d-pack-section">
+              <label>Legacy render pack</label>
+              <select value={assetPackId ?? ''} onChange={(event) => setLegacyPack(event.target.value || null)}>
+                <option value="">Select imported pack…</option>
+                {installedPacks.map((pack) => <option key={pack.id} value={pack.id}>{pack.id} · {pack.version}</option>)}
+              </select>
+              <p>Explicit render-only override. Replay evidence is unchanged.</p>
+            </section>
+          )}
+
           <section className="replay3d-inspector-section">
             <label>Subject</label>
             <strong>{manifest.data?.player_name ?? '—'}</strong>
@@ -560,9 +705,10 @@ export function Replay3DPage() {
               <div><dt>Trigger</dt><dd>{formatDuration(triggerOffset)}</dd></div>
               <div><dt>Frames</dt><dd>{frames.length.toLocaleString()}</dd></div>
               <div><dt>Players</dt><dd>{tracks.size}</dd></div>
-              <div><dt>Minecraft</dt><dd>{worldContext?.minecraft_version ?? 'unknown'}</dd></div>
+              <div><dt>Minecraft</dt><dd>{worldContext?.minecraft_version ?? 'not recorded'}</dd></div>
               <div><dt>Dimension</dt><dd>{worldContext?.environment ?? 'unknown'}</dd></div>
-              <div><dt>Render pack</dt><dd>{assetPack ? assetPack.id : assetPackId ? `${assetPackId} loading` : 'not recorded'}</dd></div>
+              <div><dt>Render pack</dt><dd>{assetPackId ? `${assetPackId} · ${packSource}` : 'not selected'}</dd></div>
+              <div><dt>Section meshes</dt><dd>{worldSections.length.toLocaleString()}</dd></div>
               <div><dt>Timeline load</dt><dd>{replayChunksLoaded}/{replayChunksTotal}</dd></div>
               <div><dt>World load</dt><dd>{worldChunksLoaded}/{worldChunksTotal}</dd></div>
               <div><dt>Texture load</dt><dd>{texturesLoaded}/{requiredTextureAssets.length}</dd></div>
@@ -574,6 +720,7 @@ export function Replay3DPage() {
             ) : manifest.data?.world_snapshot?.anchor_precision === 'trigger_estimate' ? (
               <p>This older replay has no per-chunk capture timestamps; trigger time is used as the world-keyframe estimate.</p>
             ) : null}
+            {packSource === 'manual' && <p>The selected render pack is a manual visualization override because this legacy replay did not record one.</p>}
             {assetPackId && assetPackQuery.isError && (
               <p>Playback is intentionally blocked until <code>{assetPackId}</code> is installed locally. HackerGuardian will not silently start a fidelity replay with missing textures.</p>
             )}

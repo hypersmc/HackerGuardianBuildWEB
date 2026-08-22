@@ -15,13 +15,20 @@ import {
 } from 'three'
 import type { MinecraftAssetCatalog } from './minecraftAssets'
 import { MinecraftWorldMesh } from './MinecraftWorldMesh'
+import {
+  applySectionAtTime,
+  sectionWorldRevision,
+  type ReplayWorldSection,
+} from './replaySections'
 import type { CameraMode, ReplayPlayerFrame, ReplayWorldContext } from './types'
-import { buildWorldGeometry, type VoxelWorld } from './voxel'
+import { buildWorldGeometry, type TimedReplayEvent } from './voxel'
 
 type Origin = { x: number; y: number; z: number }
 
 type Props = {
-  world: VoxelWorld
+  sections: ReplayWorldSection[]
+  eventsBySection: ReadonlyMap<string, TimedReplayEvent[]>
+  playhead: number
   players: ReplayPlayerFrame[]
   subject: ReplayPlayerFrame | null
   origin: Origin
@@ -36,6 +43,8 @@ type Props = {
   readyToken?: string
   onSceneReady?: () => void
 }
+
+const NO_EVENTS: TimedReplayEvent[] = []
 
 function direction(player: ReplayPlayerFrame) {
   const yaw = MathUtils.degToRad(player.rotation.yaw)
@@ -108,23 +117,66 @@ function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | nul
   return null
 }
 
-function ProceduralWorldMesh({ world, origin }: { world: VoxelWorld; origin: Origin }) {
+function ProceduralWorldMesh({
+  sections,
+  eventsBySection,
+  playhead,
+  origin,
+}: {
+  sections: ReplayWorldSection[]
+  eventsBySection: ReadonlyMap<string, TimedReplayEvent[]>
+  playhead: number
+  origin: Origin
+}) {
+  const texture = useMemo(() => voxelTexture(), [])
+  useEffect(() => () => texture.dispose(), [texture])
+
+  return (
+    <group position={[-origin.x, -origin.y, -origin.z]}>
+      {sections.map((section) => (
+        <ProceduralSectionMesh
+          key={section.key}
+          section={section}
+          events={eventsBySection.get(section.key) ?? NO_EVENTS}
+          playhead={playhead}
+          texture={texture}
+        />
+      ))}
+    </group>
+  )
+}
+
+function ProceduralSectionMesh({
+  section,
+  events,
+  playhead,
+  texture,
+}: {
+  section: ReplayWorldSection
+  events: TimedReplayEvent[]
+  playhead: number
+  texture: Texture
+}) {
+  const revision = sectionWorldRevision(events, playhead, section.anchorMs)
+  const world = useMemo(
+    () => applySectionAtTime(section.blocks, events, playhead, section.anchorMs),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [section.blocks, events, section.anchorMs, revision],
+  )
   const opaque = useMemo(() => buildWorldGeometry(world, false), [world])
   const transparent = useMemo(() => buildWorldGeometry(world, true), [world])
-  const texture = useMemo(() => voxelTexture(), [])
 
   useEffect(() => () => {
     opaque.dispose()
     transparent.dispose()
   }, [opaque, transparent])
-  useEffect(() => () => texture.dispose(), [texture])
 
   return (
-    <group position={[-origin.x, -origin.y, -origin.z]}>
-      <mesh geometry={opaque} receiveShadow castShadow>
+    <group>
+      <mesh geometry={opaque}>
         <meshStandardMaterial map={texture} vertexColors roughness={0.92} metalness={0} />
       </mesh>
-      <mesh geometry={transparent}>
+      <mesh geometry={transparent} renderOrder={2}>
         <meshStandardMaterial map={texture} vertexColors transparent opacity={0.58} depthWrite={false} roughness={0.65} />
       </mesh>
     </group>
@@ -147,12 +199,12 @@ function PlayerModel({ player, origin, showHitbox }: { player: ReplayPlayerFrame
   return (
     <group position={[x, y, z]} rotation={[0, yaw, 0]}>
       <group position={[0, crouch, 0]} rotation={[player.sneaking ? 0.18 : 0, 0, 0]}>
-        <mesh position={[0, 1.55, 0]} castShadow><boxGeometry args={[0.5, 0.5, 0.5]} /><meshStandardMaterial color={body} /></mesh>
-        <mesh position={[0, 0.98, 0]} castShadow><boxGeometry args={[0.56, 0.72, 0.3]} /><meshStandardMaterial color={dark} /></mesh>
-        <mesh position={[-0.39, 1.0, 0]} castShadow><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
-        <mesh position={[0.39, 1.0, 0]} castShadow><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
-        <mesh position={[-0.16, 0.36, 0]} castShadow><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
-        <mesh position={[0.16, 0.36, 0]} castShadow><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
+        <mesh position={[0, 1.55, 0]}><boxGeometry args={[0.5, 0.5, 0.5]} /><meshStandardMaterial color={body} /></mesh>
+        <mesh position={[0, 0.98, 0]}><boxGeometry args={[0.56, 0.72, 0.3]} /><meshStandardMaterial color={dark} /></mesh>
+        <mesh position={[-0.39, 1.0, 0]}><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
+        <mesh position={[0.39, 1.0, 0]}><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
+        <mesh position={[-0.16, 0.36, 0]}><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
+        <mesh position={[0.16, 0.36, 0]}><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
       </group>
       {showHitbox && <mesh position={[0, 0.9, 0]}><boxGeometry args={[0.62, 1.8, 0.62]} /><meshBasicMaterial color={subject ? '#58f3e5' : '#8bc9ff'} wireframe transparent opacity={0.65} /></mesh>}
       <Html position={[0, 2.05 + crouch, 0]} center distanceFactor={10} style={{ pointerEvents: 'none' }}>
@@ -199,29 +251,51 @@ function environment(context?: ReplayWorldContext) {
 }
 
 function SceneReady({ token, onReady }: { token: string; onReady?: () => void }) {
-  const signalled = useRef(false)
-  const raf = useRef<number | null>(null)
+  const { gl, scene, camera } = useThree()
+  const onReadyRef = useRef(onReady)
+  onReadyRef.current = onReady
 
   useEffect(() => {
-    signalled.current = false
-    return () => {
-      if (raf.current !== null) cancelAnimationFrame(raf.current)
-    }
-  }, [token])
+    let cancelled = false
+    let frame: number | null = null
 
-  useFrame(() => {
-    if (signalled.current) return
-    signalled.current = true
-    // useFrame runs before the draw. Waiting one browser frame means the initial
-    // geometry/material/texture upload and shader compilation have had a complete
-    // render before the parent unlocks playback.
-    raf.current = requestAnimationFrame(() => onReady?.())
-  })
+    const warm = async () => {
+      try {
+        await gl.compileAsync(scene, camera)
+      } catch {
+        // compileAsync is a warm-up optimization. A normal first draw still
+        // provides the fallback path if the browser cannot parallel-compile.
+      }
+      if (cancelled) return
+      frame = requestAnimationFrame(() => {
+        if (!cancelled) onReadyRef.current?.()
+      })
+    }
+
+    void warm()
+    return () => {
+      cancelled = true
+      if (frame !== null) cancelAnimationFrame(frame)
+    }
+  }, [token, gl, scene, camera])
 
   return null
 }
 
-function Scene({ world, players, subject, origin, cameraMode, showHitboxes, assetPack, worldContext, readyToken = '', onSceneReady }: Props) {
+function Scene({
+  sections,
+  eventsBySection,
+  playhead,
+  players,
+  subject,
+  origin,
+  cameraMode,
+  showHitboxes,
+  assetPack,
+  worldContext,
+  readyToken = '',
+  onSceneReady,
+}: Props) {
   const target: [number, number, number] = subject
     ? [subject.position.x - origin.x, subject.position.y - origin.y + 1, subject.position.z - origin.z]
     : [0, 1, 0]
@@ -232,17 +306,26 @@ function Scene({ world, players, subject, origin, cameraMode, showHitboxes, asse
       <color attach="background" args={[env.sky]} />
       <fog attach="fog" args={[env.fog, 70, 220]} />
       <ambientLight intensity={env.ambient} />
-      <directionalLight position={[28, 45, 18]} intensity={env.sun} castShadow shadow-mapSize={[2048, 2048]} />
+      <directionalLight position={[28, 45, 18]} intensity={env.sun} />
       <hemisphereLight args={[env.hemiSky, env.hemiGround, 0.4]} />
 
       {assetPack ? (
         <MinecraftWorldMesh
-          world={world}
+          sections={sections}
+          eventsBySection={eventsBySection}
+          playhead={playhead}
           origin={origin}
           catalog={assetPack.catalog}
           textures={assetPack.textures}
         />
-      ) : <ProceduralWorldMesh world={world} origin={origin} />}
+      ) : (
+        <ProceduralWorldMesh
+          sections={sections}
+          eventsBySection={eventsBySection}
+          playhead={playhead}
+          origin={origin}
+        />
+      )}
 
       {players.map((player) => <PlayerModel key={player.uuid} player={player} origin={origin} showHitbox={showHitboxes} />)}
 
@@ -274,8 +357,7 @@ export function ReplayScene3D(props: Props) {
   return (
     <Canvas
       className="replay3d-canvas"
-      shadows
-      dpr={[1, 1.75]}
+      dpr={[1, 1.5]}
       camera={{ position: initialPosition, fov: 70, near: 0.03, far: 700 }}
       gl={{ antialias: false, powerPreference: 'high-performance' }}
     >
