@@ -29,8 +29,9 @@ export type SerializedReplayMeshWorld = {
 }
 
 export type ReplayMeshWorkerProgress = {
-  phase: 'meshing' | 'combining'
+  phase: 'starting' | 'transferring' | 'catalog' | 'decoding' | 'dynamic' | 'meshing' | 'combining'
   completed: number
   total: number
   revisions: number
+  detail?: string
 }
