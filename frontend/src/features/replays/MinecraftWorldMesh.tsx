@@ -1,37 +1,30 @@
-import { memo, useEffect, useMemo } from 'react'
+import { memo } from 'react'
 import type { Texture } from 'three'
-import type { MinecraftAssetCatalog } from './minecraftAssets'
-import { buildMinecraftGeometry } from './minecraftModels'
-import {
-  applySectionAtTime,
-  sectionWorldRevision,
-  type ReplayWorldSection,
-} from './replaySections'
-import type { TimedReplayEvent } from './voxel'
+import { sectionWorldRevision } from './replaySections'
+import type {
+  PreparedDynamicReplaySection,
+  PreparedReplayGeometry,
+  PreparedReplayMeshWorld,
+} from './replayMeshPreload'
 
 type Origin = { x: number; y: number; z: number }
 
 type Props = {
-  sections: ReplayWorldSection[]
-  eventsBySection: ReadonlyMap<string, TimedReplayEvent[]>
+  world: PreparedReplayMeshWorld
   playhead: number
   origin: Origin
-  catalog: MinecraftAssetCatalog
   textures: ReadonlyMap<string, Texture>
 }
 
-const NO_EVENTS: TimedReplayEvent[] = []
-
-export const MinecraftWorldMesh = memo(function MinecraftWorldMesh({ sections, eventsBySection, playhead, origin, catalog, textures }: Props) {
+export const MinecraftWorldMesh = memo(function MinecraftWorldMesh({ world, playhead, origin, textures }: Props) {
   return (
     <group position={[-origin.x, -origin.y, -origin.z]}>
-      {sections.map((section) => (
-        <MinecraftSectionMesh
+      <GeometryGroups groups={world.staticGroups} textures={textures} prefix="static" />
+      {world.dynamicSections.map((section) => (
+        <DynamicSection
           key={section.key}
           section={section}
-          events={eventsBySection.get(section.key) ?? NO_EVENTS}
           playhead={playhead}
-          catalog={catalog}
           textures={textures}
         />
       ))}
@@ -39,40 +32,36 @@ export const MinecraftWorldMesh = memo(function MinecraftWorldMesh({ sections, e
   )
 })
 
-function MinecraftSectionMesh({
+function DynamicSection({
   section,
-  events,
   playhead,
-  catalog,
   textures,
 }: {
-  section: ReplayWorldSection
-  events: TimedReplayEvent[]
+  section: PreparedDynamicReplaySection
   playhead: number
-  catalog: MinecraftAssetCatalog
   textures: ReadonlyMap<string, Texture>
 }) {
-  const revision = sectionWorldRevision(events, playhead, section.anchorMs)
-  const world = useMemo(
-    () => applySectionAtTime(section.blocks, events, playhead, section.anchorMs),
-    // playhead intentionally does not participate directly: a section is rebuilt
-    // only when its visible block-event revision changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [section.blocks, events, section.anchorMs, revision],
-  )
-  const groups = useMemo(() => buildMinecraftGeometry(world, catalog), [world, catalog])
+  const revision = sectionWorldRevision(section.events, playhead, section.anchorMs)
+  const groups = section.revisions[revision] ?? section.revisions.base ?? []
+  return <GeometryGroups groups={groups} textures={textures} prefix={`${section.key}:${revision}`} />
+}
 
-  useEffect(() => () => {
-    for (const group of groups) group.geometry.dispose()
-  }, [groups])
-
+function GeometryGroups({
+  groups,
+  textures,
+  prefix,
+}: {
+  groups: PreparedReplayGeometry[]
+  textures: ReadonlyMap<string, Texture>
+  prefix: string
+}) {
   return (
-    <group>
+    <>
       {groups.map((group) => {
         const texture = group.texture ? textures.get(group.texture) : null
         return (
           <mesh
-            key={group.key}
+            key={`${prefix}:${group.key}`}
             geometry={group.geometry}
             renderOrder={group.layer === 'translucent' ? 2 : group.layer === 'cutout' ? 1 : 0}
           >
@@ -89,6 +78,6 @@ function MinecraftSectionMesh({
           </mesh>
         )
       })}
-    </group>
+    </>
   )
 }

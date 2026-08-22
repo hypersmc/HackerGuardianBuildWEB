@@ -1,0 +1,115 @@
+.replay3d-engine-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(4, 9, 13, .98);
+}
+
+.replay3d-engine-overlay > div {
+  width: min(560px, 100%);
+  padding: 18px 19px;
+  border: 1px solid #294657;
+  background: #081117;
+  box-shadow: 0 22px 74px rgba(0, 0, 0, .52);
+}
+
+.replay3d-engine-overlay span {
+  display: block;
+  margin-bottom: 8px;
+  color: #4fcabd;
+  font: 8px/1 var(--mono);
+  letter-spacing: .12em;
+}
+
+.replay3d-engine-overlay strong {
+  display: block;
+  color: #e3edf3;
+  font-size: 17px;
+  font-weight: 650;
+}
+
+.replay3d-engine-overlay p {
+  margin: 8px 0 0;
+  color: #8194a2;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.replay3d-engine-overlay--error > div {
+  border-color: #693843;
+}
+
+.replay3d-engine-overlay--error span {
+  color: #ee8292;
+}
+
+.replay3d-engine-badge {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 15;
+  padding: 6px 8px;
+  border: 1px solid rgba(76, 196, 183, .38);
+  background: rgba(4, 10, 14, .88);
+  color: #72d9ce;
+  font: 8px/1 var(--mono);
+  letter-spacing: .08em;
+  pointer-events: none;
+}
+
+.webgpu-route-guard {
+  min-height: 320px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 34px 38px;
+  border: 1px solid #263b49;
+  background:
+    linear-gradient(rgba(45, 212, 191, .035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(45, 212, 191, .035) 1px, transparent 1px),
+    #080d12;
+  background-size: 32px 32px;
+}
+
+.webgpu-route-guard > span {
+  margin-bottom: 10px;
+  color: #4fcabd;
+  font: 8px/1 var(--mono);
+  letter-spacing: .13em;
+}
+
+.webgpu-route-guard h1 {
+  margin: 0;
+  color: #e4edf3;
+  font-size: 24px;
+  font-weight: 650;
+}
+
+.webgpu-route-guard p {
+  max-width: 700px;
+  margin: 9px 0 0;
+  color: #7e909f;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.webgpu-route-guard--blocked {
+  border-color: #62323c;
+}
+
+.webgpu-route-guard--blocked > span {
+  color: #ed8291;
+}
+
+.webgpu-route-guard__note {
+  max-width: 700px;
+  margin-top: 20px;
+  padding: 11px 12px;
+  border-left: 2px solid #35566a;
+  background: #0a1218;
+  color: #708391;
+  font: 9px/1.55 var(--mono);
+}

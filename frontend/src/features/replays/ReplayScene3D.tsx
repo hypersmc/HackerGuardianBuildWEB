@@ -1,27 +1,30 @@
-import { Html, Line, OrbitControls } from '@react-three/drei'
+import { Html, OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { useEffect, useMemo, useRef } from 'react'
+import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Color,
-  DataTexture,
-  LinearMipmapLinearFilter,
   MathUtils,
-  NearestFilter,
-  RGBAFormat,
-  SRGBColorSpace,
+  Quaternion,
   type Texture,
-  UnsignedByteType,
   Vector3,
 } from 'three'
 import type { MinecraftAssetCatalog } from './minecraftAssets'
 import { MinecraftWorldMesh } from './MinecraftWorldMesh'
 import {
-  applySectionAtTime,
-  sectionWorldRevision,
-  type ReplayWorldSection,
-} from './replaySections'
+  disposeReplayMeshWorld,
+  preloadReplayMeshWorld,
+  type PreparedReplayMeshWorld,
+  type ReplayMeshProgress,
+} from './replayMeshPreload'
+import type { ReplayWorldSection } from './replaySections'
 import type { CameraMode, ReplayPlayerFrame, ReplayWorldContext } from './types'
-import { buildWorldGeometry, type TimedReplayEvent } from './voxel'
+import type { TimedReplayEvent } from './voxel'
+import {
+  createRequiredWebGpuRenderer,
+  probeRequiredWebGpu,
+  type WebGpuProbe,
+} from './webgpuSupport'
+import '../../styles/replay-engine.css'
 
 type Origin = { x: number; y: number; z: number }
 
@@ -44,8 +47,6 @@ type Props = {
   onSceneReady?: () => void
 }
 
-const NO_EVENTS: TimedReplayEvent[] = []
-
 function direction(player: ReplayPlayerFrame) {
   const yaw = MathUtils.degToRad(player.rotation.yaw)
   const pitch = MathUtils.degToRad(player.rotation.pitch)
@@ -55,30 +56,6 @@ function direction(player: ReplayPlayerFrame) {
     -Math.sin(pitch),
     Math.cos(yaw) * cosPitch,
   ).normalize()
-}
-
-function voxelTexture() {
-  const size = 16
-  const data = new Uint8Array(size * size * 4)
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const i = (y * size + x) * 4
-      const edge = x === 0 || y === 0 || x === size - 1 || y === size - 1
-      const hash = ((x * 37 + y * 71 + x * y * 13) ^ (x << 3) ^ (y << 5)) & 31
-      const value = edge ? 202 + (hash >> 2) : 224 + hash
-      data[i] = value
-      data[i + 1] = value
-      data[i + 2] = value
-      data[i + 3] = 255
-    }
-  }
-  const texture = new DataTexture(data, size, size, RGBAFormat, UnsignedByteType)
-  texture.colorSpace = SRGBColorSpace
-  texture.magFilter = NearestFilter
-  texture.minFilter = LinearMipmapLinearFilter
-  texture.generateMipmaps = true
-  texture.needsUpdate = true
-  return texture
 }
 
 function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | null; origin: Origin; mode: CameraMode }) {
@@ -117,110 +94,69 @@ function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | nul
   return null
 }
 
-function ProceduralWorldMesh({
-  sections,
-  eventsBySection,
-  playhead,
-  origin,
+function DirectionRay({
+  start,
+  vector,
+  color,
+  radius,
 }: {
-  sections: ReplayWorldSection[]
-  eventsBySection: ReadonlyMap<string, TimedReplayEvent[]>
-  playhead: number
-  origin: Origin
+  start: Vector3
+  vector: Vector3
+  color: string
+  radius: number
 }) {
-  const texture = useMemo(() => voxelTexture(), [])
-  useEffect(() => () => texture.dispose(), [texture])
+  const length = vector.length()
+  if (length <= 0.0001) return null
+  const midpoint = start.clone().addScaledVector(vector, 0.5)
+  const quaternion = new Quaternion().setFromUnitVectors(
+    new Vector3(0, 1, 0),
+    vector.clone().normalize(),
+  )
+  const position = midpoint.toArray() as [number, number, number]
 
   return (
-    <group position={[-origin.x, -origin.y, -origin.z]}>
-      {sections.map((section) => (
-        <ProceduralSectionMesh
-          key={section.key}
-          section={section}
-          events={eventsBySection.get(section.key) ?? NO_EVENTS}
-          playhead={playhead}
-          texture={texture}
-        />
-      ))}
-    </group>
-  )
-}
-
-function ProceduralSectionMesh({
-  section,
-  events,
-  playhead,
-  texture,
-}: {
-  section: ReplayWorldSection
-  events: TimedReplayEvent[]
-  playhead: number
-  texture: Texture
-}) {
-  const revision = sectionWorldRevision(events, playhead, section.anchorMs)
-  const world = useMemo(
-    () => applySectionAtTime(section.blocks, events, playhead, section.anchorMs),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [section.blocks, events, section.anchorMs, revision],
-  )
-  const opaque = useMemo(() => buildWorldGeometry(world, false), [world])
-  const transparent = useMemo(() => buildWorldGeometry(world, true), [world])
-
-  useEffect(() => () => {
-    opaque.dispose()
-    transparent.dispose()
-  }, [opaque, transparent])
-
-  return (
-    <group>
-      <mesh geometry={opaque}>
-        <meshStandardMaterial map={texture} vertexColors roughness={0.92} metalness={0} />
-      </mesh>
-      <mesh geometry={transparent} renderOrder={2}>
-        <meshStandardMaterial map={texture} vertexColors transparent opacity={0.58} depthWrite={false} roughness={0.65} />
-      </mesh>
-    </group>
+    <mesh position={position} quaternion={quaternion}>
+      <cylinderGeometry args={[radius, radius, length, 5, 1, false]} />
+      <meshBasicMaterial color={color} transparent opacity={0.72} depthWrite={false} />
+    </mesh>
   )
 }
 
 function PlayerModel({ player, origin, showHitbox }: { player: ReplayPlayerFrame; origin: Origin; showHitbox: boolean }) {
-  const subject = player.subject
-  const body = subject ? '#2fd5c4' : '#63a9ec'
-  const dark = subject ? '#1b8f87' : '#376d9e'
+  const isSubject = player.subject
+  const body = isSubject ? '#2fd5c4' : '#63a9ec'
+  const dark = isSubject ? '#1b8f87' : '#376d9e'
   const x = player.position.x - origin.x
   const y = player.position.y - origin.y
   const z = player.position.z - origin.z
   const yaw = -MathUtils.degToRad(player.rotation.yaw)
   const crouch = player.sneaking ? -0.12 : 0
   const eyeHeight = player.sneaking ? 1.5 : 1.62
-  const eye = new Vector3(x, y + eyeHeight, z)
-  const aim = direction(player).multiplyScalar(subject ? 4 : 2.2)
+  const aim = direction(player).multiplyScalar(isSubject ? 4 : 2.2)
 
   return (
-    <group position={[x, y, z]} rotation={[0, yaw, 0]}>
-      <group position={[0, crouch, 0]} rotation={[player.sneaking ? 0.18 : 0, 0, 0]}>
-        <mesh position={[0, 1.55, 0]}><boxGeometry args={[0.5, 0.5, 0.5]} /><meshStandardMaterial color={body} /></mesh>
-        <mesh position={[0, 0.98, 0]}><boxGeometry args={[0.56, 0.72, 0.3]} /><meshStandardMaterial color={dark} /></mesh>
-        <mesh position={[-0.39, 1.0, 0]}><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
-        <mesh position={[0.39, 1.0, 0]}><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
-        <mesh position={[-0.16, 0.36, 0]}><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
-        <mesh position={[0.16, 0.36, 0]}><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
+    <group position={[x, y, z]}>
+      <group rotation={[0, yaw, 0]}>
+        <group position={[0, crouch, 0]} rotation={[player.sneaking ? 0.18 : 0, 0, 0]}>
+          <mesh position={[0, 1.55, 0]}><boxGeometry args={[0.5, 0.5, 0.5]} /><meshStandardMaterial color={body} /></mesh>
+          <mesh position={[0, 0.98, 0]}><boxGeometry args={[0.56, 0.72, 0.3]} /><meshStandardMaterial color={dark} /></mesh>
+          <mesh position={[-0.39, 1.0, 0]}><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
+          <mesh position={[0.39, 1.0, 0]}><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
+          <mesh position={[-0.16, 0.36, 0]}><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
+          <mesh position={[0.16, 0.36, 0]}><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
+        </group>
       </group>
-      {showHitbox && <mesh position={[0, 0.9, 0]}><boxGeometry args={[0.62, 1.8, 0.62]} /><meshBasicMaterial color={subject ? '#58f3e5' : '#8bc9ff'} wireframe transparent opacity={0.65} /></mesh>}
+      {showHitbox && <mesh position={[0, 0.9, 0]}><boxGeometry args={[0.62, 1.8, 0.62]} /><meshBasicMaterial color={isSubject ? '#58f3e5' : '#8bc9ff'} wireframe transparent opacity={0.65} /></mesh>}
       <Html position={[0, 2.05 + crouch, 0]} center distanceFactor={10} style={{ pointerEvents: 'none' }}>
-        <div className={`replay3d-nameplate${subject ? ' replay3d-nameplate--subject' : ''}`}>
-          {player.name}{subject ? ' · SUBJECT' : ''}
+        <div className={`replay3d-nameplate${isSubject ? ' replay3d-nameplate--subject' : ''}`}>
+          {player.name}{isSubject ? ' · SUBJECT' : ''}
         </div>
       </Html>
-      <Line
-        points={[
-          [eye.x - x, eye.y - y, eye.z - z],
-          [eye.x - x + aim.x, eye.y - y + aim.y, eye.z - z + aim.z],
-        ]}
-        color={subject ? '#38e2d0' : '#6baee8'}
-        lineWidth={subject ? 1.6 : 0.8}
-        transparent
-        opacity={0.7}
+      <DirectionRay
+        start={new Vector3(0, eyeHeight, 0)}
+        vector={aim}
+        color={isSubject ? '#38e2d0' : '#6baee8'}
+        radius={isSubject ? 0.012 : 0.007}
       />
     </group>
   )
@@ -258,20 +194,17 @@ function SceneReady({ token, onReady }: { token: string; onReady?: () => void })
   useEffect(() => {
     let cancelled = false
     let frame: number | null = null
-
     const warm = async () => {
       try {
         await gl.compileAsync(scene, camera)
       } catch {
-        // compileAsync is a warm-up optimization. A normal first draw still
-        // provides the fallback path if the browser cannot parallel-compile.
+        // The first real WebGPU draw is still the authoritative fallback warm-up.
       }
       if (cancelled) return
       frame = requestAnimationFrame(() => {
         if (!cancelled) onReadyRef.current?.()
       })
     }
-
     void warm()
     return () => {
       cancelled = true
@@ -283,19 +216,21 @@ function SceneReady({ token, onReady }: { token: string; onReady?: () => void })
 }
 
 function Scene({
-  sections,
-  eventsBySection,
+  preparedWorld,
   playhead,
   players,
   subject,
   origin,
   cameraMode,
   showHitboxes,
-  assetPack,
+  textures,
   worldContext,
-  readyToken = '',
+  readyToken,
   onSceneReady,
-}: Props) {
+}: Omit<Props, 'sections' | 'eventsBySection' | 'assetPack'> & {
+  preparedWorld: PreparedReplayMeshWorld
+  textures: ReadonlyMap<string, Texture>
+}) {
   const target: [number, number, number] = subject
     ? [subject.position.x - origin.x, subject.position.y - origin.y + 1, subject.position.z - origin.z]
     : [0, 1, 0]
@@ -309,24 +244,7 @@ function Scene({
       <directionalLight position={[28, 45, 18]} intensity={env.sun} />
       <hemisphereLight args={[env.hemiSky, env.hemiGround, 0.4]} />
 
-      {assetPack ? (
-        <MinecraftWorldMesh
-          sections={sections}
-          eventsBySection={eventsBySection}
-          playhead={playhead}
-          origin={origin}
-          catalog={assetPack.catalog}
-          textures={assetPack.textures}
-        />
-      ) : (
-        <ProceduralWorldMesh
-          sections={sections}
-          eventsBySection={eventsBySection}
-          playhead={playhead}
-          origin={origin}
-        />
-      )}
-
+      <MinecraftWorldMesh world={preparedWorld} playhead={playhead} origin={origin} textures={textures} />
       {players.map((player) => <PlayerModel key={player.uuid} player={player} origin={origin} showHitbox={showHitboxes} />)}
 
       <CameraRig subject={subject} origin={origin} mode={cameraMode} />
@@ -339,29 +257,147 @@ function Scene({
         maxDistance={160}
         minDistance={0.4}
       />
-      <SceneReady token={readyToken} onReady={onSceneReady} />
+      <SceneReady token={readyToken ?? ''} onReady={onSceneReady} />
     </>
   )
 }
 
+class RendererBoundary extends Component<{
+  children: ReactNode
+  onError: (message: string) => void
+}, { failed: boolean }> {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  componentDidCatch(error: unknown) {
+    this.props.onError(error instanceof Error ? error.message : String(error))
+  }
+
+  render() {
+    return this.state.failed ? null : this.props.children
+  }
+}
+
+function webGpuRendererFactory(defaults: unknown) {
+  return createRequiredWebGpuRenderer(defaults as Record<string, unknown>)
+}
+
+function EngineOverlay({ title, detail, error = false }: { title: string; detail: string; error?: boolean }) {
+  return (
+    <div className={`replay3d-engine-overlay${error ? ' replay3d-engine-overlay--error' : ''}`}>
+      <div>
+        <span>{error ? '3D REPLAY BLOCKED' : 'REPLAY ENGINE'}</span>
+        <strong>{title}</strong>
+        <p>{detail}</p>
+      </div>
+    </div>
+  )
+}
+
+function meshProgressText(progress: ReplayMeshProgress | null) {
+  if (!progress) return 'Starting off-main-thread Minecraft mesh preparation…'
+  if (progress.phase === 'combining') return `Combining static world geometry · ${progress.revisions} dynamic revisions prepared`
+  if (progress.phase === 'hydrating') return `Preparing GPU buffers ${progress.completed}/${progress.total} · ${progress.revisions} dynamic revisions`
+  return `Meshing sections ${progress.completed}/${progress.total} · ${progress.revisions} dynamic revisions`
+}
+
 export function ReplayScene3D(props: Props) {
+  const [probe, setProbe] = useState<WebGpuProbe | null>(null)
+  const [preparedWorld, setPreparedWorld] = useState<PreparedReplayMeshWorld | null>(null)
+  const [meshProgress, setMeshProgress] = useState<ReplayMeshProgress | null>(null)
+  const [meshError, setMeshError] = useState<string | null>(null)
+  const [rendererError, setRendererError] = useState<string | null>(null)
+  const [rendererReady, setRendererReady] = useState(false)
+  const catalog = props.assetPack?.catalog ?? null
+
+  useEffect(() => {
+    let cancelled = false
+    void probeRequiredWebGpu().then((result) => {
+      if (!cancelled) setProbe(result)
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  useEffect(() => {
+    setRendererReady(false)
+    setRendererError(null)
+  }, [props.readyToken])
+
+  useEffect(() => {
+    if (!probe?.supported || !catalog) return
+    const controller = new AbortController()
+    let ownedWorld: PreparedReplayMeshWorld | null = null
+    let cancelled = false
+
+    setPreparedWorld(null)
+    setMeshProgress(null)
+    setMeshError(null)
+
+    void preloadReplayMeshWorld(
+      props.sections,
+      props.eventsBySection,
+      catalog,
+      (progress) => {
+        if (!cancelled) setMeshProgress(progress)
+      },
+      controller.signal,
+    ).then((world) => {
+      if (cancelled) {
+        disposeReplayMeshWorld(world)
+        return
+      }
+      ownedWorld = world
+      setPreparedWorld(world)
+    }).catch((error) => {
+      if (!cancelled) setMeshError(error instanceof Error ? error.message : String(error))
+    })
+
+    return () => {
+      cancelled = true
+      controller.abort()
+      if (ownedWorld) disposeReplayMeshWorld(ownedWorld)
+    }
+  }, [probe?.supported, catalog, props.sections, props.eventsBySection, props.readyToken])
+
+  if (!probe) return <EngineOverlay title="Checking WebGPU" detail="Probing for a hardware-accelerated WebGPU adapter…" />
+  if (!probe.supported) return <EngineOverlay error title="WebGPU required" detail={probe.message} />
+  if (!props.assetPack) {
+    return <EngineOverlay error title="Minecraft render pack required" detail="Install or select the Minecraft asset pack for this replay. The fidelity viewer will not fall back to WebGL or a diagnostic block renderer." />
+  }
+  if (meshError) return <EngineOverlay error title="Replay mesh preparation failed" detail={meshError} />
+  if (!preparedWorld) return <EngineOverlay title="Preparing Minecraft geometry" detail={meshProgressText(meshProgress)} />
+  if (rendererError) return <EngineOverlay error title="WebGPU renderer failed" detail={rendererError} />
+
   const subject = props.subject
   const initialPosition: [number, number, number] = subject
-    ? [
-        subject.position.x - props.origin.x + 7,
-        subject.position.y - props.origin.y + 5,
-        subject.position.z - props.origin.z + 7,
-      ]
+    ? [subject.position.x - props.origin.x + 7, subject.position.y - props.origin.y + 5, subject.position.z - props.origin.z + 7]
     : [8, 7, 8]
 
+  const ready = () => {
+    if (rendererReady) return
+    setRendererReady(true)
+    props.onSceneReady?.()
+  }
+
   return (
-    <Canvas
-      className="replay3d-canvas"
-      dpr={[1, 1.5]}
-      camera={{ position: initialPosition, fov: 70, near: 0.03, far: 700 }}
-      gl={{ antialias: false, powerPreference: 'high-performance' }}
-    >
-      <Scene {...props} />
-    </Canvas>
+    <RendererBoundary key={props.readyToken ?? 'replay'} onError={setRendererError}>
+      <Canvas
+        className="replay3d-canvas"
+        dpr={[1, 1.5]}
+        camera={{ position: initialPosition, fov: 70, near: 0.03, far: 700 }}
+        gl={webGpuRendererFactory}
+      >
+        <Scene
+          {...props}
+          preparedWorld={preparedWorld}
+          textures={props.assetPack.textures}
+          onSceneReady={ready}
+        />
+      </Canvas>
+      {!rendererReady && <div className="replay3d-engine-badge">WEBGPU · compiling replay scene</div>}
+    </RendererBoundary>
   )
 }
