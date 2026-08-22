@@ -1,0 +1,96 @@
+.replay3d-page { min-width: 0; }
+.replay3d-heading { align-items: end; }
+.replay3d-shortcuts { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.replay3d-shortcuts span { border: 1px solid var(--border-soft); background: #091016; padding: 6px 8px; color: #718495; font: 8px/1 var(--mono); text-transform: uppercase; }
+
+.replay3d-workbench {
+  display: grid;
+  grid-template-columns: 250px minmax(520px, 1fr) 280px;
+  min-height: 720px;
+  border: 1px solid var(--border);
+  background: #080c10;
+}
+.replay3d-library, .replay3d-inspector { min-width: 0; background: #0c1116; }
+.replay3d-library { border-right: 1px solid var(--border); }
+.replay3d-inspector { border-left: 1px solid var(--border); }
+.replay3d-panel-title { min-height: 43px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--border); }
+.replay3d-panel-title span { color: #dbe4eb; font-size: 11px; font-weight: 650; }
+.replay3d-panel-title small { color: var(--dim); font: 8px/1 var(--mono); text-transform: uppercase; }
+.replay3d-library-list { max-height: 675px; overflow: auto; scrollbar-width: thin; scrollbar-color: #273745 transparent; }
+.replay3d-library-item { width: 100%; min-height: 78px; display: grid; grid-template-columns: 42px minmax(0, 1fr); grid-template-rows: 22px 20px 18px; align-items: center; gap: 0 8px; padding: 9px 11px; border: 0; border-bottom: 1px solid var(--border-soft); background: transparent; color: #a6b3bf; text-align: left; cursor: pointer; }
+.replay3d-library-item:hover { background: #101820; }
+.replay3d-library-item--active { background: #10202a; box-shadow: inset 3px 0 0 var(--teal); }
+.replay3d-library-id { grid-row: 1 / 4; color: #53697b; font: 9px/1 var(--mono); }
+.replay3d-library-item strong { color: #e3eaf0; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.replay3d-library-item small { color: #748493; font: 8px/1 var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.replay3d-library-item time { color: #566675; font-size: 8px; }
+.replay3d-message { padding: 20px 12px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.replay3d-message--error { color: #e48391; }
+
+.replay3d-center { min-width: 0; display: grid; grid-template-rows: minmax(620px, 1fr) 58px; }
+.replay3d-stage { min-width: 0; min-height: 620px; position: relative; overflow: hidden; background: #071017; }
+.replay3d-stage:fullscreen { width: 100vw; height: 100vh; min-height: 100vh; }
+.replay3d-stage:fullscreen .replay3d-canvas { height: 100vh !important; }
+.replay3d-canvas { position: absolute !important; inset: 0; width: 100% !important; height: 100% !important; }
+.replay3d-stage-overlay { position: absolute; inset: 0; z-index: 5; display: grid; place-items: center; background: #071017; color: #7d909f; font: 10px/1 var(--mono); }
+.replay3d-stage-overlay--error { color: #df7888; }
+.replay3d-hud { position: absolute; z-index: 4; left: 10px; right: 10px; display: flex; gap: 8px; pointer-events: none; }
+.replay3d-hud--top { top: 9px; }
+.replay3d-hud--bottom { bottom: 9px; justify-content: flex-end; }
+.replay3d-hud span { padding: 5px 7px; border: 1px solid rgba(58, 91, 111, .55); background: rgba(4, 10, 14, .78); backdrop-filter: blur(5px); color: #87a0b1; font: 8px/1 var(--mono); }
+.replay3d-nameplate { padding: 3px 5px; border: 1px solid rgba(86,168,255,.45); background: rgba(4,9,12,.83); color: #a9c5dc; font: 8px/1 var(--mono); white-space: nowrap; }
+.replay3d-nameplate--subject { border-color: rgba(52,214,192,.62); color: #8deadd; }
+
+.replay3d-controls { min-width: 0; display: grid; grid-template-columns: 38px 86px minmax(130px, 1fr) 86px 70px; align-items: center; gap: 9px; padding: 0 10px; border-top: 1px solid var(--border); background: #0b1116; }
+.replay3d-controls > button, .replay3d-controls select { height: 31px; border: 1px solid #2a3946; background: #091016; color: #9fb0bd; border-radius: 2px; cursor: pointer; }
+.replay3d-controls > button:hover:not(:disabled), .replay3d-controls select:hover { border-color: #41647c; color: #e2ebf1; }
+.replay3d-controls > button:disabled { opacity: .35; cursor: default; }
+.replay3d-time { color: #8fa0ae; font: 9px/1 var(--mono); text-align: center; }
+.replay3d-timeline-wrap { height: 30px; position: relative; display: flex; align-items: center; }
+.replay3d-timeline-wrap input { width: 100%; accent-color: var(--teal); }
+.replay3d-trigger-marker { width: 2px !important; min-width: 2px; height: 18px !important; position: absolute; top: 6px; transform: translateX(-1px); padding: 0 !important; border: 0 !important; background: var(--amber) !important; box-shadow: 0 0 7px rgba(232,183,94,.58); }
+
+.replay3d-inspector { overflow: auto; max-height: 720px; scrollbar-width: thin; scrollbar-color: #273745 transparent; }
+.replay3d-inspector-section { padding: 13px 12px; border-bottom: 1px solid var(--border-soft); }
+.replay3d-inspector-section > label { display: block; margin-bottom: 10px; color: #5f7485; font: 8px/1 var(--mono); text-transform: uppercase; letter-spacing: .08em; }
+.replay3d-inspector-section > strong { display: block; margin-bottom: 10px; color: #e1e8ee; font-size: 13px; }
+.replay3d-segmented { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: #23303a; border: 1px solid #23303a; }
+.replay3d-segmented button, .replay3d-toggle-row button, .replay3d-wide-button { min-height: 31px; border: 0; background: #0b1218; color: #758898; font: 8px/1 var(--mono); text-transform: uppercase; cursor: pointer; }
+.replay3d-segmented button.active, .replay3d-toggle-row button.active { background: #12313a; color: #76dfd2; }
+.replay3d-segmented button:hover, .replay3d-wide-button:hover { color: white; background: #111d25; }
+.replay3d-toggle-row { min-height: 38px; display: flex; align-items: center; justify-content: space-between; margin-top: 8px; color: #81909d; font-size: 10px; }
+.replay3d-toggle-row button { min-width: 42px; border: 1px solid #273641; }
+.replay3d-wide-button { width: 100%; margin-top: 8px; border: 1px solid #2c3b47; }
+.replay3d-inspector dl { margin: 0; display: grid; gap: 1px; background: #1a252e; }
+.replay3d-inspector dl > div { min-height: 31px; display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 8px; background: #0a1015; }
+.replay3d-inspector dt { color: #637584; font-size: 9px; }
+.replay3d-inspector dd { margin: 0; max-width: 150px; color: #aab8c3; font: 8px/1.3 var(--mono); text-align: right; overflow-wrap: anywhere; }
+.replay3d-event-section { padding-left: 0; padding-right: 0; }
+.replay3d-event-section > label { padding: 0 12px; }
+.replay3d-event { width: 100%; min-height: 40px; display: grid; grid-template-columns: 63px minmax(0, 1fr); align-items: center; gap: 8px; padding: 0 11px; border: 0; border-top: 1px solid #17212a; background: transparent; color: #8c9ca8; text-align: left; cursor: pointer; }
+.replay3d-event:hover { background: #111a21; }
+.replay3d-event time { color: #607586; font: 8px/1 var(--mono); }
+.replay3d-event span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; }
+.replay3d-no-events { padding: 8px 12px 3px; color: #5f6d79; font-size: 9px; }
+.replay3d-meta p { margin: 10px 0 0; color: #687a88; font-size: 9px; line-height: 1.55; }
+
+@media (max-width: 1380px) {
+  .replay3d-workbench { grid-template-columns: 215px minmax(480px, 1fr) 245px; }
+}
+@media (max-width: 1120px) {
+  .replay3d-workbench { grid-template-columns: 190px minmax(420px, 1fr); }
+  .replay3d-inspector { grid-column: 1 / -1; max-height: none; border-left: 0; border-top: 1px solid var(--border); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .replay3d-inspector > .replay3d-panel-title { grid-column: 1 / -1; }
+  .replay3d-inspector-section { border-right: 1px solid var(--border-soft); }
+}
+@media (max-width: 780px) {
+  .replay3d-heading { align-items: start; }
+  .replay3d-shortcuts { justify-content: flex-start; }
+  .replay3d-workbench { display: block; }
+  .replay3d-library { border-right: 0; border-bottom: 1px solid var(--border); }
+  .replay3d-library-list { max-height: 220px; }
+  .replay3d-center { grid-template-rows: 500px 58px; }
+  .replay3d-stage { min-height: 500px; }
+  .replay3d-inspector { display: block; }
+  .replay3d-controls { grid-template-columns: 35px 72px minmax(100px, 1fr) 72px 58px; gap: 5px; padding: 0 6px; }
+}

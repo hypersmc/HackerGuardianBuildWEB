@@ -29,6 +29,12 @@ Route::prefix('v1')->group(function (): void {
         Route::get('/replays/{id}', [HackerGuardianController::class, 'replay'])->whereNumber('id');
         Route::get('/replays/{id}/chunks/{seq}', [HackerGuardianController::class, 'replayChunk'])
             ->whereNumber('id')->whereNumber('seq');
+        Route::get('/replays/{id}/world', [HackerGuardianController::class, 'replayWorld'])
+            ->whereNumber('id');
+        Route::get('/replays/{id}/world/chunks/{x}/{z}', [HackerGuardianController::class, 'replayWorldChunk'])
+            ->whereNumber('id')
+            ->where('x', '-?[0-9]+')
+            ->where('z', '-?[0-9]+');
 
         Route::get('/detection/status', [HackerGuardianController::class, 'detectionStatus']);
         Route::get('/detection/recent', [HackerGuardianController::class, 'detectionRecent']);
