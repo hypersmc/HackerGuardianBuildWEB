@@ -4,6 +4,7 @@ export type WebGpuProbe =
   | {
       supported: true
       adapterLabel: string | null
+      featureLevel: 'core' | 'compatibility'
     }
   | {
       supported: false
@@ -26,14 +27,19 @@ type AdapterInfo = {
     device?: string
     description?: string
   }
+  features?: {
+    has(feature: string): boolean
+  }
 }
 
 let probePromise: Promise<WebGpuProbe> | null = null
 
 /**
- * Probe the browser/runtime rather than browser-sniffing. The replay renderer is
- * intentionally WebGPU-only; an available WebGL2 context is not accepted as a
- * substitute because large evidence replays need the modern renderer path.
+ * Probe the browser/runtime rather than browser-sniffing. Three r183+ deliberately
+ * requests WebGPU compatibility mode first and upgrades to core capabilities when
+ * the selected adapter exposes them. Mirror that behavior here instead of requiring
+ * a core/high-performance adapter up front; Chromium on Linux can expose a valid
+ * hardware WebGPU compatibility adapter while a core request returns null.
  */
 export function probeRequiredWebGpu(): Promise<WebGpuProbe> {
   if (probePromise) return probePromise
@@ -57,23 +63,31 @@ export function probeRequiredWebGpu(): Promise<WebGpuProbe> {
     }
 
     try {
-      const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' })
+      // featureLevel=compatibility is intentionally the lowest WebGPU feature level
+      // the replay renderer can start from. On modern Vulkan/D3D/Metal adapters the
+      // returned adapter still exposes core-features-and-limits and Three upgrades
+      // to the core path. On Chromium/Linux this also permits Dawn's hardware GLES
+      // compatibility backend when Vulkan is not the active browser graphics path.
+      const adapter = await gpu.requestAdapter({ featureLevel: 'compatibility' })
       if (!adapter) {
         return {
           supported: false,
           code: 'adapter-unavailable',
-          message: 'WebGPU is exposed, but no usable GPU adapter could be acquired. Check browser GPU/hardware-acceleration settings.',
+          message: 'WebGPU is exposed, but Chromium did not return even a compatibility-level GPU adapter. Check chrome://gpu, browser GPU flags and hardware acceleration.',
         }
       }
 
-      const info = (adapter as AdapterInfo).info
+      const typedAdapter = adapter as AdapterInfo
+      const info = typedAdapter.info
       const label = [info?.vendor, info?.architecture, info?.device]
         .filter((value): value is string => Boolean(value))
         .join(' · ')
+      const featureLevel = typedAdapter.features?.has('core-features-and-limits') ? 'core' : 'compatibility'
 
       return {
         supported: true,
         adapterLabel: label || info?.description || null,
+        featureLevel,
       }
     } catch (error) {
       return {
@@ -121,9 +135,9 @@ export async function createRequiredWebGpuRenderer(defaults: Record<string, unkn
       }).backend
 
       // WebGPURenderer can use a WebGL2 backend. HackerGuardian deliberately does
-      // not accept that fallback for the fidelity replay path. Check Three's stable
-      // backend capability flag rather than constructor names, which minifiers can
-      // rewrite in production builds.
+      // not accept that fallback for the fidelity replay path. Compatibility mode
+      // is still WebGPU and therefore passes this check; only Three's WebGL backend
+      // is rejected.
       if (backend?.isWebGPUBackend !== true) {
         renderer.dispose()
         throw new Error('WebGPU initialization fell back to a non-WebGPU backend. WebGL fallback is disabled for 3D replay evidence.')
