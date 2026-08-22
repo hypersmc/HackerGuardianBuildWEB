@@ -1,6 +1,6 @@
 import { Html, Line, OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { Suspense, useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import {
   Color,
   DataTexture,
@@ -9,6 +9,7 @@ import {
   NearestFilter,
   RGBAFormat,
   SRGBColorSpace,
+  type Texture,
   UnsignedByteType,
   Vector3,
 } from 'three'
@@ -26,8 +27,14 @@ type Props = {
   origin: Origin
   cameraMode: CameraMode
   showHitboxes: boolean
-  assetPack?: { id: string; catalog: MinecraftAssetCatalog } | null
+  assetPack?: {
+    id: string
+    catalog: MinecraftAssetCatalog
+    textures: ReadonlyMap<string, Texture>
+  } | null
   worldContext?: ReplayWorldContext
+  readyToken?: string
+  onSceneReady?: () => void
 }
 
 function direction(player: ReplayPlayerFrame) {
@@ -191,7 +198,30 @@ function environment(context?: ReplayWorldContext) {
   }
 }
 
-function Scene({ world, players, subject, origin, cameraMode, showHitboxes, assetPack, worldContext }: Props) {
+function SceneReady({ token, onReady }: { token: string; onReady?: () => void }) {
+  const signalled = useRef(false)
+  const raf = useRef<number | null>(null)
+
+  useEffect(() => {
+    signalled.current = false
+    return () => {
+      if (raf.current !== null) cancelAnimationFrame(raf.current)
+    }
+  }, [token])
+
+  useFrame(() => {
+    if (signalled.current) return
+    signalled.current = true
+    // useFrame runs before the draw. Waiting one browser frame means the initial
+    // geometry/material/texture upload and shader compilation have had a complete
+    // render before the parent unlocks playback.
+    raf.current = requestAnimationFrame(() => onReady?.())
+  })
+
+  return null
+}
+
+function Scene({ world, players, subject, origin, cameraMode, showHitboxes, assetPack, worldContext, readyToken = '', onSceneReady }: Props) {
   const target: [number, number, number] = subject
     ? [subject.position.x - origin.x, subject.position.y - origin.y + 1, subject.position.z - origin.z]
     : [0, 1, 0]
@@ -206,9 +236,12 @@ function Scene({ world, players, subject, origin, cameraMode, showHitboxes, asse
       <hemisphereLight args={[env.hemiSky, env.hemiGround, 0.4]} />
 
       {assetPack ? (
-        <Suspense fallback={<ProceduralWorldMesh world={world} origin={origin} />}>
-          <MinecraftWorldMesh world={world} origin={origin} packId={assetPack.id} catalog={assetPack.catalog} />
-        </Suspense>
+        <MinecraftWorldMesh
+          world={world}
+          origin={origin}
+          catalog={assetPack.catalog}
+          textures={assetPack.textures}
+        />
       ) : <ProceduralWorldMesh world={world} origin={origin} />}
 
       {players.map((player) => <PlayerModel key={player.uuid} player={player} origin={origin} showHitbox={showHitboxes} />)}
@@ -223,6 +256,7 @@ function Scene({ world, players, subject, origin, cameraMode, showHitboxes, asse
         maxDistance={160}
         minDistance={0.4}
       />
+      <SceneReady token={readyToken} onReady={onSceneReady} />
     </>
   )
 }
