@@ -19,6 +19,28 @@ Backend:  http://localhost:8000
 
 Vite proxies `/api` and `/sanctum` requests to Laravel during development. Production is intended to use one origin, e.g. `https://hg.example.com/` for React and `https://hg.example.com/api/*` for Laravel.
 
+## Local bootstrap
+
+From `backend/`:
+
+```bash
+composer install
+cp .env.example .env
+php artisan key:generate
+php artisan migrate
+php artisan hg:user:create
+php artisan serve
+```
+
+`hg:user:create` asks interactively for the email address, display name and password. Password input is hidden and is never passed on the command line.
+
+From `frontend/`:
+
+```bash
+npm install
+npm run dev
+```
+
 ## Initial roadmap
 
 1. Laravel API foundation

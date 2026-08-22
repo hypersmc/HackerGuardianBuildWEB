@@ -17,8 +17,14 @@ jobs:
       - name: Validate Composer manifest
         working-directory: backend
         run: composer validate --no-check-lock --strict
+      - name: Install backend dependencies
+        working-directory: backend
+        run: composer install --no-interaction --prefer-dist --no-progress
       - name: PHP syntax check
         run: find backend -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Boot Laravel and verify HG commands
+        working-directory: backend
+        run: php artisan list --raw | grep -E '^hg:(about|user:create)'
 
   frontend:
     runs-on: ubuntu-latest
