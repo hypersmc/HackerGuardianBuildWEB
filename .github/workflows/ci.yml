@@ -21,10 +21,12 @@ jobs:
         working-directory: backend
         run: composer install --no-interaction --prefer-dist --no-progress
       - name: PHP syntax check
-        run: find backend -name '*.php' -print0 | xargs -0 -n1 php -l
-      - name: Boot Laravel and verify HG commands
+        run: find backend/app backend/bootstrap backend/config backend/database backend/routes -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Boot Laravel and verify routes and HG commands
         working-directory: backend
-        run: php artisan list --raw | grep -E '^hg:(about|user:create)'
+        run: |
+          php artisan list --raw | grep -E '^hg:(about|user:create)'
+          php artisan route:list --path=api/v1 --except-vendor
 
   frontend:
     runs-on: ubuntu-latest
