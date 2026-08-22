@@ -3,9 +3,14 @@ import type { ReplayEvent, ReplayFrame, WorldChunkData } from './types'
 
 export type TimedReplayEvent = ReplayEvent & { t: number }
 export type VoxelWorld = Map<string, string>
+export type WorldChunkAnchors = Map<string, number>
 
 export function blockKey(x: number, y: number, z: number) {
   return `${x},${y},${z}`
+}
+
+export function worldChunkKey(world: string, chunkX: number, chunkZ: number) {
+  return `${world}:${chunkX},${chunkZ}`
 }
 
 export function expandWorldChunks(chunks: WorldChunkData[]): VoxelWorld {
@@ -38,6 +43,14 @@ export function expandWorldChunks(chunks: WorldChunkData[]): VoxelWorld {
   return world
 }
 
+export function expandWorldChunkAnchors(chunks: WorldChunkData[]): WorldChunkAnchors {
+  const anchors: WorldChunkAnchors = new Map()
+  for (const chunk of chunks) {
+    anchors.set(worldChunkKey(chunk.world, chunk.chunk_x, chunk.chunk_z), Math.max(0, chunk.anchor_ms ?? 0))
+  }
+  return anchors
+}
+
 export function flattenEvents(frames: ReplayFrame[]): TimedReplayEvent[] {
   const events: TimedReplayEvent[] = []
   for (const frame of frames) {
@@ -46,36 +59,55 @@ export function flattenEvents(frames: ReplayFrame[]): TimedReplayEvent[] {
   return events.sort((a, b) => a.t - b.t)
 }
 
-export function worldEventRevision(events: TimedReplayEvent[], playhead: number, anchor: number) {
+export function worldEventRevision(
+  events: TimedReplayEvent[],
+  playhead: number,
+  fallbackAnchor: number,
+  anchors: WorldChunkAnchors = new Map(),
+) {
   let revision = 0
   for (const event of events) {
     if (!isBlockEvent(event)) continue
+    const anchor = eventAnchor(event, fallbackAnchor, anchors)
     if (playhead >= anchor) {
       if (event.t > anchor && event.t <= playhead) revision++
     } else if (event.t > playhead && event.t <= anchor) {
       revision++
     }
   }
-  return `${playhead >= anchor ? 'f' : 'r'}:${revision}`
+  return `${playhead >= fallbackAnchor ? 'f' : 'r'}:${revision}`
 }
 
-export function applyWorldAtTime(base: VoxelWorld, events: TimedReplayEvent[], playhead: number, anchor: number): VoxelWorld {
+export function applyWorldAtTime(
+  base: VoxelWorld,
+  events: TimedReplayEvent[],
+  playhead: number,
+  fallbackAnchor: number,
+  anchors: WorldChunkAnchors = new Map(),
+): VoxelWorld {
   const world = new Map(base)
-  if (playhead >= anchor) {
-    for (const event of events) {
-      if (event.t <= anchor) continue
-      if (event.t > playhead) break
-      applyForward(world, event)
-    }
-  } else {
-    for (let i = events.length - 1; i >= 0; i--) {
-      const event = events[i]
-      if (event.t > anchor) continue
-      if (event.t <= playhead) break
+
+  // Each stored chunk is a complete world keyframe with its own exact capture time.
+  // Reconstruct each block event relative to the anchor of the chunk it affects.
+  for (const event of events) {
+    if (!isBlockEvent(event)) continue
+    const anchor = eventAnchor(event, fallbackAnchor, anchors)
+    if (playhead >= anchor) {
+      if (event.t > anchor && event.t <= playhead) applyForward(world, event)
+    } else if (event.t > playhead && event.t <= anchor) {
       applyReverse(world, event)
     }
   }
+
   return world
+}
+
+function eventAnchor(event: TimedReplayEvent, fallback: number, anchors: WorldChunkAnchors) {
+  if (!event.position) return fallback
+  const world = typeof event.world === 'string' && event.world ? event.world : 'world'
+  const chunkX = Math.floor(event.position.x / 16)
+  const chunkZ = Math.floor(event.position.z / 16)
+  return anchors.get(worldChunkKey(world, chunkX, chunkZ)) ?? fallback
 }
 
 function applyForward(world: VoxelWorld, event: TimedReplayEvent) {
@@ -202,7 +234,7 @@ const faces = [
   { dir: [0, 1, 0], normal: [0, 1, 0], corners: [[0,1,1],[1,1,1],[1,1,0],[0,1,0]] },
   { dir: [0, -1, 0], normal: [0, -1, 0], corners: [[0,0,0],[1,0,0],[1,0,1],[0,0,1]] },
   { dir: [0, 0, 1], normal: [0, 0, 1], corners: [[1,0,1],[1,1,1],[0,1,1],[0,0,1]] },
-  { dir: [0, 0, -1], normal: [0, 0, -1], corners: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]] },
+  { dir: [0, 0, -1], normal: [0, 0,-1], corners: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]] },
 ] as const
 
 const uvCorners = [[0, 0], [0, 1], [1, 1], [1, 0]] as const

@@ -1,7 +1,8 @@
 import { Html, Line, OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { useEffect, useMemo } from 'react'
+import { Suspense, useEffect, useMemo } from 'react'
 import {
+  Color,
   DataTexture,
   LinearMipmapLinearFilter,
   MathUtils,
@@ -11,7 +12,9 @@ import {
   UnsignedByteType,
   Vector3,
 } from 'three'
-import type { CameraMode, ReplayPlayerFrame } from './types'
+import type { MinecraftAssetCatalog } from './minecraftAssets'
+import { MinecraftWorldMesh } from './MinecraftWorldMesh'
+import type { CameraMode, ReplayPlayerFrame, ReplayWorldContext } from './types'
 import { buildWorldGeometry, type VoxelWorld } from './voxel'
 
 type Origin = { x: number; y: number; z: number }
@@ -23,6 +26,8 @@ type Props = {
   origin: Origin
   cameraMode: CameraMode
   showHitboxes: boolean
+  assetPack?: { id: string; catalog: MinecraftAssetCatalog } | null
+  worldContext?: ReplayWorldContext
 }
 
 function direction(player: ReplayPlayerFrame) {
@@ -96,7 +101,7 @@ function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | nul
   return null
 }
 
-function WorldMesh({ world, origin }: { world: VoxelWorld; origin: Origin }) {
+function ProceduralWorldMesh({ world, origin }: { world: VoxelWorld; origin: Origin }) {
   const opaque = useMemo(() => buildWorldGeometry(world, false), [world])
   const transparent = useMemo(() => buildWorldGeometry(world, true), [world])
   const texture = useMemo(() => voxelTexture(), [])
@@ -162,23 +167,52 @@ function PlayerModel({ player, origin, showHitbox }: { player: ReplayPlayerFrame
   )
 }
 
-function Scene({ world, players, subject, origin, cameraMode, showHitboxes }: Props) {
+function environment(context?: ReplayWorldContext) {
+  const dimension = context?.environment?.toUpperCase() ?? 'NORMAL'
+  if (dimension.includes('NETHER')) {
+    return { sky: '#2a0805', fog: '#330a08', ambient: 0.42, sun: 0.55, hemiSky: '#5f251d', hemiGround: '#170402' }
+  }
+  if (dimension.includes('END')) {
+    return { sky: '#08050f', fog: '#0d0818', ambient: 0.55, sun: 0.4, hemiSky: '#6b5888', hemiGround: '#130e1c' }
+  }
+
+  const time = ((context?.game_time ?? 6000) % 24000 + 24000) % 24000
+  const daylight = Math.max(0.08, (Math.cos(((time - 6000) / 24000) * Math.PI * 2) + 1) / 2)
+  const stormFactor = context?.storm ? 0.58 : 1
+  const sky = new Color('#78a7d8').multiplyScalar(Math.max(0.18, daylight * stormFactor))
+  const fog = sky.clone().lerp(new Color('#6f7880'), context?.storm ? 0.48 : 0.08)
+  return {
+    sky: `#${sky.getHexString()}`,
+    fog: `#${fog.getHexString()}`,
+    ambient: 0.28 + daylight * 0.55 * stormFactor,
+    sun: 0.25 + daylight * 1.05 * stormFactor,
+    hemiSky: '#a9cae7',
+    hemiGround: '#182113',
+  }
+}
+
+function Scene({ world, players, subject, origin, cameraMode, showHitboxes, assetPack, worldContext }: Props) {
   const target: [number, number, number] = subject
     ? [subject.position.x - origin.x, subject.position.y - origin.y + 1, subject.position.z - origin.z]
     : [0, 1, 0]
+  const env = environment(worldContext)
 
   return (
     <>
-      <color attach="background" args={['#071017']} />
-      <fog attach="fog" args={['#071017', 55, 180]} />
-      <ambientLight intensity={0.72} />
-      <directionalLight position={[28, 45, 18]} intensity={1.1} castShadow />
-      <hemisphereLight args={['#9bc7e9', '#182113', 0.45]} />
+      <color attach="background" args={[env.sky]} />
+      <fog attach="fog" args={[env.fog, 70, 220]} />
+      <ambientLight intensity={env.ambient} />
+      <directionalLight position={[28, 45, 18]} intensity={env.sun} castShadow shadow-mapSize={[2048, 2048]} />
+      <hemisphereLight args={[env.hemiSky, env.hemiGround, 0.4]} />
 
-      <WorldMesh world={world} origin={origin} />
+      {assetPack ? (
+        <Suspense fallback={<ProceduralWorldMesh world={world} origin={origin} />}>
+          <MinecraftWorldMesh world={world} origin={origin} packId={assetPack.id} catalog={assetPack.catalog} />
+        </Suspense>
+      ) : <ProceduralWorldMesh world={world} origin={origin} />}
+
       {players.map((player) => <PlayerModel key={player.uuid} player={player} origin={origin} showHitbox={showHitboxes} />)}
 
-      <gridHelper args={[160, 160, '#20323c', '#122028']} position={[0, -0.02, 0]} />
       <CameraRig subject={subject} origin={origin} mode={cameraMode} />
       <OrbitControls
         enabled={cameraMode === 'free'}
@@ -186,8 +220,8 @@ function Scene({ world, players, subject, origin, cameraMode, showHitboxes }: Pr
         makeDefault
         enableDamping
         dampingFactor={0.08}
-        maxDistance={120}
-        minDistance={1.5}
+        maxDistance={160}
+        minDistance={0.4}
       />
     </>
   )
@@ -208,8 +242,8 @@ export function ReplayScene3D(props: Props) {
       className="replay3d-canvas"
       shadows
       dpr={[1, 1.75]}
-      camera={{ position: initialPosition, fov: 70, near: 0.05, far: 500 }}
-      gl={{ antialias: true, powerPreference: 'high-performance' }}
+      camera={{ position: initialPosition, fov: 70, near: 0.03, far: 700 }}
+      gl={{ antialias: false, powerPreference: 'high-performance' }}
     >
       <Scene {...props} />
     </Canvas>

@@ -35,11 +35,24 @@ export type ReplayChunkMeta = {
   size_bytes: number
 }
 
+export type ReplayWorldContext = {
+  world?: string
+  minecraft_version?: string
+  environment?: string
+  game_time?: number
+  full_time?: number
+  storm?: boolean
+  thundering?: boolean
+  resource_pack_id?: string | null
+}
+
 export type WorldChunkMeta = {
   world: string
   chunk_x: number
   chunk_z: number
   size_bytes: number
+  anchor_ms?: number
+  anchor_precision?: 'exact' | 'trigger_estimate' | string
 }
 
 export type WorldSnapshotManifest = {
@@ -50,6 +63,7 @@ export type WorldSnapshotManifest = {
   chunk_count: number
   size_bytes: number
   chunks: WorldChunkMeta[]
+  context?: ReplayWorldContext
 }
 
 export type ReplayManifest = ReplaySummary & {
@@ -125,6 +139,7 @@ export type WorldChunkData = {
   chunk_x: number
   chunk_z: number
   anchor_ms: number
+  anchor_precision?: 'exact' | 'trigger_estimate' | string
   min_y: number
   max_y: number
   order: 'y-x-z'

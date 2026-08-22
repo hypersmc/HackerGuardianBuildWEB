@@ -14,6 +14,7 @@ jobs:
         with:
           php-version: '8.4'
           coverage: none
+          extensions: zip
       - name: Validate Composer manifest
         working-directory: backend
         run: composer validate --no-check-lock --strict
@@ -25,7 +26,7 @@ jobs:
       - name: Boot Laravel and verify routes and HG commands
         working-directory: backend
         run: |
-          php artisan list --raw | grep -E '^hg:(about|user:create)'
+          php artisan list --raw | grep -E '^hg:(about|user:create|assets:import|assets:list)'
           php artisan route:list --path=api/v1 --except-vendor
 
   frontend:

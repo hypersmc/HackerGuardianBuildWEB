@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueries, useQuery } from '@tanstack/react-query'
 import { replayApi } from '../features/replays/api'
+import { minecraftAssetApi } from '../features/replays/minecraftAssets'
 import { ReplayScene3D } from '../features/replays/ReplayScene3D'
 import type {
   CameraMode,
   PlayerSample,
   ReplayEvent,
   ReplayPlayerFrame,
-  WorldChunkMeta,
   WorldChunkData,
 } from '../features/replays/types'
 import {
   applyWorldAtTime,
+  expandWorldChunkAnchors,
   expandWorldChunks,
   flattenEvents,
   worldEventRevision,
@@ -81,17 +82,15 @@ function interpolateTrack(track: PlayerSample[], time: number): ReplayPlayerFram
       pitch: before.rotation.pitch + (after.rotation.pitch - before.rotation.pitch) * amount,
     },
     on_ground: amount < 0.5 ? before.on_ground : after.on_ground,
+    sneaking: amount < 0.5 ? before.sneaking : after.sneaking,
+    sprinting: amount < 0.5 ? before.sprinting : after.sprinting,
     held_item: amount < 0.5 ? before.held_item : after.held_item,
   }
 }
 
 function eventLabel(event: ReplayEvent & { t?: number }) {
-  const detail = event.block ?? event.item ?? (event.enabled === undefined ? '' : event.enabled ? 'ON' : 'OFF')
+  const detail = event.block ?? event.item ?? event.projectile ?? (event.enabled === undefined ? '' : event.enabled ? 'ON' : 'OFF')
   return detail ? `${event.type} · ${String(detail)}` : event.type
-}
-
-function sameChunk(a: WorldChunkMeta, b: WorldChunkMeta) {
-  return a.world === b.world && a.chunk_x === b.chunk_x && a.chunk_z === b.chunk_z
 }
 
 export function Replay3DPage() {
@@ -118,6 +117,16 @@ export function Replay3DPage() {
     queryKey: ['replay', selectedId, 'manifest'],
     queryFn: () => replayApi.manifest(selectedId as number),
     enabled: selectedId !== null,
+  })
+
+  const worldContext = manifest.data?.world_snapshot?.context
+  const assetPackId = worldContext?.resource_pack_id || worldContext?.minecraft_version || null
+  const assetPackQuery = useQuery({
+    queryKey: ['minecraft-assets', assetPackId],
+    queryFn: () => minecraftAssetApi.catalog(assetPackId as string),
+    enabled: Boolean(assetPackId),
+    staleTime: Infinity,
+    retry: false,
   })
 
   const replayChunkQueries = useQueries({
@@ -253,15 +262,16 @@ export function Replay3DPage() {
     .filter((chunk): chunk is WorldChunkData => Boolean(chunk)), [worldChunkQueries])
 
   const baseWorld = useMemo(() => expandWorldChunks(loadedWorldChunks), [loadedWorldChunks])
+  const worldAnchors = useMemo(() => expandWorldChunkAnchors(loadedWorldChunks), [loadedWorldChunks])
   const events = useMemo(() => flattenEvents(frames), [frames])
   const anchor = manifest.data?.world_snapshot?.anchor_ms ?? manifest.data?.trigger_offset_ms ?? 0
-  const revision = worldEventRevision(events, playhead, anchor)
+  const revision = worldEventRevision(events, playhead, anchor, worldAnchors)
   // The map only changes when a block event boundary is crossed. Omitting playhead
   // from the dependency list avoids rebuilding voxel geometry every animation frame.
   const world = useMemo(
-    () => applyWorldAtTime(baseWorld, events, playhead, anchor),
+    () => applyWorldAtTime(baseWorld, events, playhead, anchor, worldAnchors),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [baseWorld, events, anchor, revision],
+    [baseWorld, events, anchor, worldAnchors, revision],
   )
 
   const currentEvents = useMemo(() => events.filter((event) => Math.abs(event.t - playhead) <= 650).slice(-12), [events, playhead])
@@ -269,6 +279,9 @@ export function Replay3DPage() {
   const triggerPercent = duration > 0 ? clamp((triggerOffset / duration) * 100, 0, 100) : 0
   const allReplayChunksLoaded = replayChunkQueries.length > 0 && replayChunkQueries.every((query) => query.isSuccess)
   const worldLoading = worldChunkQueries.some((query) => query.isLoading)
+  const assetPack = assetPackQuery.data && assetPackId
+    ? { id: assetPackId, catalog: assetPackQuery.data.catalog }
+    : null
 
   async function fullscreen() {
     if (!stageRef.current) return
@@ -282,7 +295,7 @@ export function Replay3DPage() {
         <div>
           <span className="page-heading__section">Operations / Replays / 3D</span>
           <h1>Replay investigation</h1>
-          <p>Recorded Minecraft space, player movement and evidence reconstructed in a browser-side 3D scene.</p>
+          <p>Recorded Minecraft chunks, block states, players and evidence reconstructed as a navigable 3D scene.</p>
         </div>
         <div className="replay3d-shortcuts"><span>SPACE play</span><span>← → seek</span><span>1 / 2 / 3 camera</span></div>
       </header>
@@ -322,17 +335,25 @@ export function Replay3DPage() {
                   origin={origin}
                   cameraMode={cameraMode}
                   showHitboxes={showHitboxes}
+                  assetPack={assetPack}
+                  worldContext={worldContext}
                 />
                 <div className="replay3d-hud replay3d-hud--top">
                   <span>REPLAY #{manifest.data.id}</span>
                   <span>{manifest.data.server_name}</span>
+                  <span>{assetPack ? `RESOURCE ${assetPack.id}` : 'PROCEDURAL FALLBACK'}</span>
                   <span>{subject ? `${subject.position.x.toFixed(2)} ${subject.position.y.toFixed(2)} ${subject.position.z.toFixed(2)}` : 'waiting for frames'}</span>
                 </div>
                 <div className="replay3d-hud replay3d-hud--bottom">
-                  <span>{manifest.data.world_snapshot?.available ? `${loadedWorldChunks.length}/${visibleWorldChunks.length} local world chunks` : 'world snapshot unavailable'}</span>
+                  <span>{manifest.data.world_snapshot?.available ? `${loadedWorldChunks.length}/${visibleWorldChunks.length} local chunk keyframes` : 'world snapshot unavailable'}</span>
                   {worldLoading && <span>streaming world…</span>}
-                  <span>{world.size.toLocaleString()} rendered voxels</span>
+                  <span>{world.size.toLocaleString()} recorded blocks</span>
                 </div>
+                {assetPackId && assetPackQuery.isError && (
+                  <div className="replay3d-asset-warning">
+                    Render pack <strong>{assetPackId}</strong> is not installed. The scene is using the diagnostic fallback renderer.
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -389,6 +410,7 @@ export function Replay3DPage() {
               <div><dt>Yaw</dt><dd>{subject ? `${subject.rotation.yaw.toFixed(1)}°` : '—'}</dd></div>
               <div><dt>Pitch</dt><dd>{subject ? `${subject.rotation.pitch.toFixed(1)}°` : '—'}</dd></div>
               <div><dt>Ground</dt><dd>{subject?.on_ground === undefined ? '—' : subject.on_ground ? 'yes' : 'no'}</dd></div>
+              <div><dt>Pose</dt><dd>{subject?.sneaking ? 'sneaking' : subject?.sprinting ? 'sprinting' : 'standing'}</dd></div>
               <div><dt>Held</dt><dd>{subject?.held_item ?? '—'}</dd></div>
             </dl>
           </section>
@@ -410,11 +432,19 @@ export function Replay3DPage() {
               <div><dt>Trigger</dt><dd>{formatDuration(triggerOffset)}</dd></div>
               <div><dt>Frames</dt><dd>{frames.length.toLocaleString()}</dd></div>
               <div><dt>Players</dt><dd>{tracks.size}</dd></div>
+              <div><dt>Minecraft</dt><dd>{worldContext?.minecraft_version ?? 'unknown'}</dd></div>
+              <div><dt>Dimension</dt><dd>{worldContext?.environment ?? 'unknown'}</dd></div>
+              <div><dt>Render pack</dt><dd>{assetPack ? assetPack.id : assetPackId ? `${assetPackId} missing` : 'not recorded'}</dd></div>
               <div><dt>Replay data</dt><dd>{formatBytes(manifest.data?.size_bytes ?? 0)}</dd></div>
               <div><dt>World data</dt><dd>{formatBytes(manifest.data?.world_snapshot?.size_bytes ?? 0)}</dd></div>
             </dl>
-            {manifest.data?.world_snapshot?.anchor_precision === 'trigger_estimate' && (
-              <p>The stored world snapshot is anchored near the trigger; the replay event stream remains authoritative for timing.</p>
+            {manifest.data?.world_snapshot?.anchor_precision === 'exact_per_chunk' ? (
+              <p>Each captured chunk is a complete block-state keyframe with its own exact replay timestamp.</p>
+            ) : manifest.data?.world_snapshot?.anchor_precision === 'trigger_estimate' ? (
+              <p>This older replay has no per-chunk capture timestamps; trigger time is used as the world-keyframe estimate.</p>
+            ) : null}
+            {assetPackId && assetPackQuery.isError && (
+              <p>Install the matching local client/resource pack with <code>php artisan hg:assets:import … --id={assetPackId}</code> for Minecraft-faithful block models and textures.</p>
             )}
           </section>
         </aside>
