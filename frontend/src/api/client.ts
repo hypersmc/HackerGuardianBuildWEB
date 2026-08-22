@@ -48,9 +48,16 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
   })
 
-  const body = await response.json().catch(() => ({}))
+  const body = await response.json().catch(() => ({})) as {
+    message?: string
+    error?: { message?: string }
+  }
+
   if (!response.ok) {
-    throw new ApiError(response.status, body.message ?? 'Request failed')
+    throw new ApiError(
+      response.status,
+      body.error?.message ?? body.message ?? 'Request failed',
+    )
   }
 
   return body as T
