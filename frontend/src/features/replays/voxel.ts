@@ -88,8 +88,16 @@ function applyForward(world: VoxelWorld, event: TimedReplayEvent) {
 function applyReverse(world: VoxelWorld, event: TimedReplayEvent) {
   if (!isBlockEvent(event) || !event.position) return
   const key = blockKey(event.position.x, event.position.y, event.position.z)
-  if (event.type === 'BLOCK_BREAK' && typeof event.block === 'string') world.set(key, normalizeState(event.block))
-  if (event.type === 'BLOCK_PLACE') world.delete(key)
+  if (event.type === 'BLOCK_BREAK' && typeof event.block === 'string') {
+    world.set(key, normalizeState(event.block))
+  }
+  if (event.type === 'BLOCK_PLACE') {
+    if (typeof event.previous_block === 'string' && !isAir(event.previous_block)) {
+      world.set(key, normalizeState(event.previous_block))
+    } else {
+      world.delete(key)
+    }
+  }
 }
 
 function isBlockEvent(event: ReplayEvent): event is ReplayEvent & { position: { x: number; y: number; z: number } } {
@@ -186,7 +194,7 @@ function blockColor(state: string) {
   return color.setHSL(((hash >>> 0) % 360) / 360, 0.22, 0.46)
 }
 
-type MeshBuffers = { positions: number[]; normals: number[]; colors: number[] }
+type MeshBuffers = { positions: number[]; normals: number[]; colors: number[]; uvs: number[] }
 
 const faces = [
   { dir: [1, 0, 0], normal: [1, 0, 0], corners: [[1,0,0],[1,1,0],[1,1,1],[1,0,1]] },
@@ -197,8 +205,10 @@ const faces = [
   { dir: [0, 0, -1], normal: [0, 0, -1], corners: [[0,0,0],[0,1,0],[1,1,0],[1,0,0]] },
 ] as const
 
+const uvCorners = [[0, 0], [0, 1], [1, 1], [1, 0]] as const
+
 export function buildWorldGeometry(world: VoxelWorld, transparent: boolean) {
-  const buffers: MeshBuffers = { positions: [], normals: [], colors: [] }
+  const buffers: MeshBuffers = { positions: [], normals: [], colors: [], uvs: [] }
   const triangleOrder = [0, 1, 2, 0, 2, 3]
 
   for (const [key, state] of world) {
@@ -219,6 +229,7 @@ export function buildWorldGeometry(world: VoxelWorld, transparent: boolean) {
         buffers.normals.push(face.normal[0], face.normal[1], face.normal[2])
         const shade = face.normal[1] > 0 ? 1 : face.normal[1] < 0 ? 0.62 : face.normal[0] !== 0 ? 0.82 : 0.72
         buffers.colors.push(color.r * shade, color.g * shade, color.b * shade)
+        buffers.uvs.push(uvCorners[cornerIndex][0], uvCorners[cornerIndex][1])
       }
     }
   }
@@ -227,6 +238,7 @@ export function buildWorldGeometry(world: VoxelWorld, transparent: boolean) {
   geometry.setAttribute('position', new Float32BufferAttribute(buffers.positions, 3))
   geometry.setAttribute('normal', new Float32BufferAttribute(buffers.normals, 3))
   geometry.setAttribute('color', new Float32BufferAttribute(buffers.colors, 3))
+  geometry.setAttribute('uv', new Float32BufferAttribute(buffers.uvs, 2))
   geometry.computeBoundingSphere()
   return geometry
 }

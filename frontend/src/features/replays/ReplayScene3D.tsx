@@ -1,7 +1,16 @@
 import { Html, Line, OrbitControls } from '@react-three/drei'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useMemo } from 'react'
-import { MathUtils, Vector3 } from 'three'
+import {
+  DataTexture,
+  LinearMipmapLinearFilter,
+  MathUtils,
+  NearestFilter,
+  RGBAFormat,
+  SRGBColorSpace,
+  UnsignedByteType,
+  Vector3,
+} from 'three'
 import type { CameraMode, ReplayPlayerFrame } from './types'
 import { buildWorldGeometry, type VoxelWorld } from './voxel'
 
@@ -27,6 +36,30 @@ function direction(player: ReplayPlayerFrame) {
   ).normalize()
 }
 
+function voxelTexture() {
+  const size = 16
+  const data = new Uint8Array(size * size * 4)
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      const i = (y * size + x) * 4
+      const edge = x === 0 || y === 0 || x === size - 1 || y === size - 1
+      const hash = ((x * 37 + y * 71 + x * y * 13) ^ (x << 3) ^ (y << 5)) & 31
+      const value = edge ? 202 + (hash >> 2) : 224 + hash
+      data[i] = value
+      data[i + 1] = value
+      data[i + 2] = value
+      data[i + 3] = 255
+    }
+  }
+  const texture = new DataTexture(data, size, size, RGBAFormat, UnsignedByteType)
+  texture.colorSpace = SRGBColorSpace
+  texture.magFilter = NearestFilter
+  texture.minFilter = LinearMipmapLinearFilter
+  texture.generateMipmaps = true
+  texture.needsUpdate = true
+  return texture
+}
+
 function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | null; origin: Origin; mode: CameraMode }) {
   const { camera } = useThree()
   const desired = useMemo(() => new Vector3(), [])
@@ -41,9 +74,10 @@ function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | nul
       subject.position.z - origin.z,
     )
     const aim = direction(subject)
+    const eyeHeight = subject.sneaking ? 1.5 : 1.62
 
     if (mode === 'pov') {
-      desired.copy(local).add(new Vector3(0, 1.62, 0))
+      desired.copy(local).add(new Vector3(0, eyeHeight, 0))
       lookAt.copy(desired).addScaledVector(aim, 10)
       camera.position.lerp(desired, 1 - Math.exp(-delta * 18))
       camera.lookAt(lookAt)
@@ -54,7 +88,7 @@ function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | nul
     if (horizontal.lengthSq() < 0.001) horizontal.set(0, 0, 1)
     horizontal.normalize()
     desired.copy(local).add(new Vector3(0, 2.3, 0)).addScaledVector(horizontal, -5.4)
-    lookAt.copy(local).add(new Vector3(0, 1.15, 0))
+    lookAt.copy(local).add(new Vector3(0, 1.05, 0))
     camera.position.lerp(desired, 1 - Math.exp(-delta * 7))
     camera.lookAt(lookAt)
   })
@@ -65,19 +99,21 @@ function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | nul
 function WorldMesh({ world, origin }: { world: VoxelWorld; origin: Origin }) {
   const opaque = useMemo(() => buildWorldGeometry(world, false), [world])
   const transparent = useMemo(() => buildWorldGeometry(world, true), [world])
+  const texture = useMemo(() => voxelTexture(), [])
 
   useEffect(() => () => {
     opaque.dispose()
     transparent.dispose()
   }, [opaque, transparent])
+  useEffect(() => () => texture.dispose(), [texture])
 
   return (
     <group position={[-origin.x, -origin.y, -origin.z]}>
       <mesh geometry={opaque} receiveShadow castShadow>
-        <meshStandardMaterial vertexColors roughness={0.92} metalness={0} />
+        <meshStandardMaterial map={texture} vertexColors roughness={0.92} metalness={0} />
       </mesh>
       <mesh geometry={transparent}>
-        <meshStandardMaterial vertexColors transparent opacity={0.58} depthWrite={false} roughness={0.65} />
+        <meshStandardMaterial map={texture} vertexColors transparent opacity={0.58} depthWrite={false} roughness={0.65} />
       </mesh>
     </group>
   )
@@ -91,19 +127,23 @@ function PlayerModel({ player, origin, showHitbox }: { player: ReplayPlayerFrame
   const y = player.position.y - origin.y
   const z = player.position.z - origin.z
   const yaw = -MathUtils.degToRad(player.rotation.yaw)
-  const eye = new Vector3(x, y + 1.62, z)
+  const crouch = player.sneaking ? -0.12 : 0
+  const eyeHeight = player.sneaking ? 1.5 : 1.62
+  const eye = new Vector3(x, y + eyeHeight, z)
   const aim = direction(player).multiplyScalar(subject ? 4 : 2.2)
 
   return (
     <group position={[x, y, z]} rotation={[0, yaw, 0]}>
-      <mesh position={[0, 1.55, 0]} castShadow><boxGeometry args={[0.5, 0.5, 0.5]} /><meshStandardMaterial color={body} /></mesh>
-      <mesh position={[0, 0.98, 0]} castShadow><boxGeometry args={[0.56, 0.72, 0.3]} /><meshStandardMaterial color={dark} /></mesh>
-      <mesh position={[-0.39, 1.0, 0]} castShadow><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
-      <mesh position={[0.39, 1.0, 0]} castShadow><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
-      <mesh position={[-0.16, 0.36, 0]} castShadow><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
-      <mesh position={[0.16, 0.36, 0]} castShadow><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
+      <group position={[0, crouch, 0]} rotation={[player.sneaking ? 0.18 : 0, 0, 0]}>
+        <mesh position={[0, 1.55, 0]} castShadow><boxGeometry args={[0.5, 0.5, 0.5]} /><meshStandardMaterial color={body} /></mesh>
+        <mesh position={[0, 0.98, 0]} castShadow><boxGeometry args={[0.56, 0.72, 0.3]} /><meshStandardMaterial color={dark} /></mesh>
+        <mesh position={[-0.39, 1.0, 0]} castShadow><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
+        <mesh position={[0.39, 1.0, 0]} castShadow><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
+        <mesh position={[-0.16, 0.36, 0]} castShadow><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
+        <mesh position={[0.16, 0.36, 0]} castShadow><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
+      </group>
       {showHitbox && <mesh position={[0, 0.9, 0]}><boxGeometry args={[0.62, 1.8, 0.62]} /><meshBasicMaterial color={subject ? '#58f3e5' : '#8bc9ff'} wireframe transparent opacity={0.65} /></mesh>}
-      <Html position={[0, 2.05, 0]} center distanceFactor={10} style={{ pointerEvents: 'none' }}>
+      <Html position={[0, 2.05 + crouch, 0]} center distanceFactor={10} style={{ pointerEvents: 'none' }}>
         <div className={`replay3d-nameplate${subject ? ' replay3d-nameplate--subject' : ''}`}>
           {player.name}{subject ? ' · SUBJECT' : ''}
         </div>

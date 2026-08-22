@@ -76,6 +76,8 @@ export type ReplayPlayerFrame = {
   position: { x: number; y: number; z: number }
   rotation: { yaw: number; pitch: number }
   on_ground?: boolean
+  sneaking?: boolean
+  sprinting?: boolean
   held_item?: string
 }
 
@@ -83,7 +85,12 @@ export type ReplayEvent = {
   type: string
   world?: string
   position?: { x: number; y: number; z: number }
+  velocity?: { x: number; y: number; z: number }
   block?: string
+  previous_block?: string
+  projectile?: string
+  hit_type?: string
+  hit_entity?: string
   enabled?: boolean
   item?: string
   [key: string]: unknown
