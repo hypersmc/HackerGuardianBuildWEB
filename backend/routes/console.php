@@ -40,16 +40,16 @@ Artisan::command('hg:user:create {email?}', function (?string $email = null): in
     return 0;
 })->purpose('Create a HackerGuardian control-plane user interactively');
 
-Artisan::command('hg:assets:import {source} {--id=} {--version=} {--overlay=*}', function (): int {
+Artisan::command('hg:assets:import {source} {--id=} {--minecraft-version=} {--overlay=*}', function (): int {
     try {
         $source = (string) $this->argument('source');
-        $version = $this->option('version');
-        $id = (string) ($this->option('id') ?: $version ?: pathinfo($source, PATHINFO_FILENAME));
+        $minecraftVersion = $this->option('minecraft-version');
+        $id = (string) ($this->option('id') ?: $minecraftVersion ?: pathinfo($source, PATHINFO_FILENAME));
         $overlays = array_values(array_filter((array) $this->option('overlay'), 'is_string'));
 
         /** @var MinecraftAssetPackStore $store */
         $store = app(MinecraftAssetPackStore::class);
-        $manifest = $store->import($source, $id, is_string($version) ? $version : null, $overlays);
+        $manifest = $store->import($source, $id, is_string($minecraftVersion) ? $minecraftVersion : null, $overlays);
 
         $this->info('Imported Minecraft render assets: '.$manifest['id']);
         $this->line('Version: '.($manifest['version'] ?? 'unknown'));

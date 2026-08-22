@@ -51,15 +51,17 @@ For example, import the client JAR matching the Minecraft version recorded by a 
 cd backend
 php artisan hg:assets:import ~/.minecraft/versions/1.21.11/1.21.11.jar \
   --id=1.21.11 \
-  --version=1.21.11
+  --minecraft-version=1.21.11
 ```
+
+`--minecraft-version` is deliberately not named `--version`: `--version` is a global Artisan/Symfony option and prints the Laravel framework version before the command runs.
 
 If the server uses a resource pack, apply it as an overlay so its block models/textures override the vanilla layer:
 
 ```bash
 php artisan hg:assets:import ~/.minecraft/versions/1.21.11/1.21.11.jar \
   --id=my-server-pack \
-  --version=1.21.11 \
+  --minecraft-version=1.21.11 \
   --overlay=/path/to/server-resource-pack.zip
 ```
 
