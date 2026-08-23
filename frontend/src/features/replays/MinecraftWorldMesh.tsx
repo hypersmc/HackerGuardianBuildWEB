@@ -1,5 +1,7 @@
-import { memo } from 'react'
+import { useFrame } from '@react-three/fiber'
+import { memo, useRef, useState } from 'react'
 import type { Texture } from 'three'
+import type { ReplayPlaybackClock } from './replayClock'
 import { sectionWorldRevision } from './replaySections'
 import type {
   PreparedDynamicReplaySection,
@@ -11,12 +13,12 @@ type Origin = { x: number; y: number; z: number }
 
 type Props = {
   world: PreparedReplayMeshWorld
-  playhead: number
+  clock: ReplayPlaybackClock
   origin: Origin
   textures: ReadonlyMap<string, Texture>
 }
 
-export const MinecraftWorldMesh = memo(function MinecraftWorldMesh({ world, playhead, origin, textures }: Props) {
+export const MinecraftWorldMesh = memo(function MinecraftWorldMesh({ world, clock, origin, textures }: Props) {
   return (
     <group position={[-origin.x, -origin.y, -origin.z]}>
       <GeometryGroups groups={world.staticGroups} textures={textures} prefix="static" />
@@ -24,7 +26,7 @@ export const MinecraftWorldMesh = memo(function MinecraftWorldMesh({ world, play
         <DynamicSection
           key={section.key}
           section={section}
-          playhead={playhead}
+          clock={clock}
           textures={textures}
         />
       ))}
@@ -34,14 +36,24 @@ export const MinecraftWorldMesh = memo(function MinecraftWorldMesh({ world, play
 
 function DynamicSection({
   section,
-  playhead,
+  clock,
   textures,
 }: {
   section: PreparedDynamicReplaySection
-  playhead: number
+  clock: ReplayPlaybackClock
   textures: ReadonlyMap<string, Texture>
 }) {
-  const revision = sectionWorldRevision(section.events, playhead, section.anchorMs)
+  const initialRevision = sectionWorldRevision(section.events, clock.getTimeMs(), section.anchorMs)
+  const revisionRef = useRef(initialRevision)
+  const [revision, setRevision] = useState(initialRevision)
+
+  useFrame(() => {
+    const next = sectionWorldRevision(section.events, clock.getTimeMs(), section.anchorMs)
+    if (next === revisionRef.current) return
+    revisionRef.current = next
+    setRevision(next)
+  }, -20)
+
   const groups = section.revisions[revision] ?? section.revisions.base ?? []
   return <GeometryGroups groups={groups} textures={textures} prefix={`${section.key}:${revision}`} />
 }
@@ -79,7 +91,7 @@ function GeometryGroups({
               alphaTest={texture ? (translucent ? 0.01 : 0.5) : 0}
               transparent={translucent}
               // Preserve the resource-pack alpha instead of applying an arbitrary
-              // scene-wide 0.76 opacity to glass/water textures.
+              // scene-wide opacity to glass/water textures.
               opacity={1}
               depthWrite={!translucent}
             />
