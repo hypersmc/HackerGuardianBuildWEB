@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useQueries, useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { replayApi } from '../features/replays/api'
 import { minecraftAssetApi, type MinecraftAssetManifest } from '../features/replays/minecraftAssets'
 import { ReplayScene3D } from '../features/replays/ReplayScene3D'
@@ -124,6 +124,7 @@ export function Replay3DPage() {
   const [sceneReady, setSceneReady] = useState(false)
   const [textureProgress, setTextureProgress] = useState({ loaded: 0, total: 0 })
   const stageRef = useRef<HTMLDivElement>(null)
+  const queryClient = useQueryClient()
 
   // One clock per selected replay. The WebGPU scene owns advancement; React only
   // observes a throttled 20 Hz UI snapshot for controls and inspector text.
@@ -133,21 +134,16 @@ export function Replay3DPage() {
 
   const list = useQuery({
     queryKey: ['replays', '3d-library'],
-    queryFn: () => replayApi.list(),
+    queryFn: ({ signal }) => replayApi.list(undefined, signal),
     refetchInterval: 30_000,
   })
 
   const assetPacksQuery = useQuery({
     queryKey: ['minecraft-assets', 'packs'],
-    queryFn: () => minecraftAssetApi.list(),
+    queryFn: ({ signal }) => minecraftAssetApi.list(signal),
     staleTime: Infinity,
     retry: false,
   })
-
-  useEffect(() => {
-    if (selectedId !== null || !list.data?.replays.length) return
-    setSelectedId(list.data.replays[0].id)
-  }, [list.data, selectedId])
 
   useEffect(() => {
     setManualPackId(null)
@@ -158,7 +154,7 @@ export function Replay3DPage() {
 
   const manifest = useQuery({
     queryKey: ['replay', selectedId, 'manifest'],
-    queryFn: () => replayApi.manifest(selectedId as number),
+    queryFn: ({ signal }) => replayApi.manifest(selectedId as number, signal),
     enabled: selectedId !== null,
   })
 
@@ -179,7 +175,7 @@ export function Replay3DPage() {
 
   const assetPackQuery = useQuery({
     queryKey: ['minecraft-assets', assetPackId],
-    queryFn: () => minecraftAssetApi.catalog(assetPackId as string),
+    queryFn: ({ signal }) => minecraftAssetApi.catalog(assetPackId as string, signal),
     enabled: Boolean(assetPackId),
     staleTime: Infinity,
     retry: false,
@@ -188,7 +184,7 @@ export function Replay3DPage() {
   const replayChunkQueries = useQueries({
     queries: (manifest.data?.chunks ?? []).map((chunk) => ({
       queryKey: ['replay', selectedId, 'chunk', chunk.seq],
-      queryFn: () => replayApi.chunk(selectedId as number, chunk.seq),
+      queryFn: ({ signal }: { signal: AbortSignal }) => replayApi.chunk(selectedId as number, chunk.seq, signal),
       staleTime: Infinity,
       gcTime: 30 * 60_000,
       retry: 2,
@@ -199,7 +195,7 @@ export function Replay3DPage() {
   const worldChunkQueries = useQueries({
     queries: worldChunkMetas.map((chunk) => ({
       queryKey: ['replay', selectedId, 'world', chunk.world, chunk.chunk_x, chunk.chunk_z],
-      queryFn: () => replayApi.worldChunk(selectedId as number, chunk.chunk_x, chunk.chunk_z, chunk.world),
+      queryFn: ({ signal }: { signal: AbortSignal }) => replayApi.worldChunk(selectedId as number, chunk.chunk_x, chunk.chunk_z, chunk.world, signal),
       staleTime: Infinity,
       gcTime: 30 * 60_000,
       retry: 2,
@@ -266,13 +262,14 @@ export function Replay3DPage() {
   }, [assetPackQuery.data, allReplayChunksLoaded, allWorldChunksLoaded, replayBlockStates])
 
   const textureQuery = useQuery({
-    queryKey: ['minecraft-assets', assetPackId, 'replay-textures', requiredTextureAssets],
-    queryFn: () => loadReplayTextures(
+    queryKey: ['replay', selectedId, 'textures', assetPackId, requiredTextureAssets],
+    queryFn: ({ signal }) => loadReplayTextures(
       assetPackId as string,
       requiredTextureAssets,
       setTextureProgress,
+      signal,
     ),
-    enabled: Boolean(assetPackId && assetPackQuery.isSuccess && allReplayChunksLoaded && allWorldChunksLoaded),
+    enabled: Boolean(selectedId !== null && assetPackId && assetPackQuery.isSuccess && allReplayChunksLoaded && allWorldChunksLoaded),
     staleTime: Infinity,
     gcTime: 30 * 60_000,
     retry: false,
@@ -393,6 +390,7 @@ export function Replay3DPage() {
   const loadFailed = preloadRows.some((row) => row.state === 'error')
   const completedGateRows = preloadRows.filter((row) => row.state === 'ready' || row.state === 'degraded').length
   const preloadProgress = Math.round((completedGateRows / preloadRows.length) * 100)
+  const replayLibraryEmpty = list.isSuccess && list.data.replays.length === 0
 
   useEffect(() => {
     setSceneReady(false)
@@ -430,6 +428,19 @@ export function Replay3DPage() {
     return () => window.removeEventListener('keydown', onKey)
   }, [canStart, clock])
 
+  function selectReplay(id: number) {
+    if (id === selectedId) return
+    const previousId = selectedId
+    clock.setPlaying(false)
+    setSceneReady(false)
+    setTextureProgress({ loaded: 0, total: 0 })
+    setManualPackId(null)
+    if (previousId !== null) {
+      void queryClient.cancelQueries({ queryKey: ['replay', previousId] })
+    }
+    setSelectedId(id)
+  }
+
   function setLegacyPack(id: string | null) {
     setManualPackId(id)
     if (selectedId === null) return
@@ -466,7 +477,7 @@ export function Replay3DPage() {
                 type="button"
                 key={replay.id}
                 className={`replay3d-library-item${selectedId === replay.id ? ' replay3d-library-item--active' : ''}`}
-                onClick={() => setSelectedId(replay.id)}
+                onClick={() => selectReplay(replay.id)}
               >
                 <span className="replay3d-library-id">#{replay.id}</span>
                 <strong>{replay.player_name}</strong>
@@ -479,6 +490,13 @@ export function Replay3DPage() {
 
         <div className="replay3d-center">
           <div className="replay3d-stage" ref={stageRef}>
+            {selectedId === null && !list.isLoading && (
+              <div className="replay3d-stage-overlay">
+                {replayLibraryEmpty
+                  ? 'No replays have been captured yet.'
+                  : 'Select a replay from the library. Replay data is loaded only after selection.'}
+              </div>
+            )}
             {manifest.isLoading && <div className="replay3d-stage-overlay">Loading replay manifest…</div>}
             {manifest.isError && <div className="replay3d-stage-overlay replay3d-stage-overlay--error">Replay could not be loaded.</div>}
             {manifest.data && dataReady && (
@@ -559,20 +577,20 @@ export function Replay3DPage() {
         </div>
 
         <aside className="replay3d-inspector">
-          <div className="replay3d-panel-title"><span>Investigation</span><small>{canStart ? 'ready' : loadFailed ? 'blocked' : 'preloading'}</small></div>
+          <div className="replay3d-panel-title"><span>Investigation</span><small>{selectedId === null ? 'idle' : canStart ? 'ready' : loadFailed ? 'blocked' : 'preloading'}</small></div>
 
           <section className="replay3d-inspector-section">
             <label>Camera</label>
             <div className="replay3d-segmented">
               {(['free', 'follow', 'pov'] as CameraMode[]).map((mode) => (
-                <button type="button" key={mode} onClick={() => setCameraMode(mode)} className={cameraMode === mode ? 'active' : ''}>{mode}</button>
+                <button type="button" key={mode} disabled={selectedId === null} onClick={() => setCameraMode(mode)} className={cameraMode === mode ? 'active' : ''}>{mode}</button>
               ))}
             </div>
-            <div className="replay3d-toggle-row"><span>Hitboxes</span><button type="button" className={showHitboxes ? 'active' : ''} onClick={() => setShowHitboxes((value) => !value)}>{showHitboxes ? 'ON' : 'OFF'}</button></div>
+            <div className="replay3d-toggle-row"><span>Hitboxes</span><button type="button" disabled={selectedId === null} className={showHitboxes ? 'active' : ''} onClick={() => setShowHitboxes((value) => !value)}>{showHitboxes ? 'ON' : 'OFF'}</button></div>
             <button className="replay3d-wide-button" type="button" onClick={fullscreen} disabled={!dataReady}>Fullscreen scene</button>
           </section>
 
-          {!recordedPackId && installedPacks.length > 0 && (
+          {selectedId !== null && !recordedPackId && installedPacks.length > 0 && (
             <section className="replay3d-inspector-section replay3d-pack-section">
               <label>Legacy render pack</label>
               <select value={assetPackId ?? ''} onChange={(event) => setLegacyPack(event.target.value || null)}>
@@ -598,13 +616,16 @@ export function Replay3DPage() {
 
           <section className="replay3d-inspector-section replay3d-event-section">
             <label>Events near playhead</label>
-            {currentEvents.length === 0 && <div className="replay3d-no-events">No recorded event in ±650 ms.</div>}
-            {currentEvents.map((event, index) => (
-              <button type="button" className="replay3d-event" key={`${event.t}-${event.type}-${index}`} onClick={() => canStart && clock.seek(event.t)} disabled={!canStart}>
-                <time>{formatDuration(event.t)}</time>
-                <span>{eventLabel(event)}</span>
-              </button>
-            ))}
+            {selectedId === null
+              ? <div className="replay3d-no-events">Select a replay to inspect recorded events.</div>
+              : currentEvents.length === 0
+                ? <div className="replay3d-no-events">No recorded event in ±650 ms.</div>
+                : currentEvents.map((event, index) => (
+                  <button type="button" className="replay3d-event" key={`${event.t}-${event.type}-${index}`} onClick={() => canStart && clock.seek(event.t)} disabled={!canStart}>
+                    <time>{formatDuration(event.t)}</time>
+                    <span>{eventLabel(event)}</span>
+                  </button>
+                ))}
           </section>
 
           <section className="replay3d-inspector-section replay3d-meta">
