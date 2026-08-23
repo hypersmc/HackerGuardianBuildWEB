@@ -3,6 +3,7 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Component, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Color,
+  Group,
   MathUtils,
   Quaternion,
   type Texture,
@@ -10,6 +11,8 @@ import {
 } from 'three'
 import type { MinecraftAssetCatalog } from './minecraftAssets'
 import { MinecraftWorldMesh } from './MinecraftWorldMesh'
+import { findSubjectTrack, latestEventProgress, samplePlayerTrack } from './replayActors'
+import type { ReplayPlaybackClock } from './replayClock'
 import {
   disposeReplayMeshWorld,
   preloadReplayMeshWorld,
@@ -17,7 +20,7 @@ import {
   type ReplayMeshProgress,
 } from './replayMeshPreload'
 import type { ReplayWorldSection } from './replaySections'
-import type { CameraMode, ReplayPlayerFrame, ReplayWorldContext } from './types'
+import type { CameraMode, PlayerSample, ReplayWorldContext } from './types'
 import type { TimedReplayEvent } from './voxel'
 import {
   createRequiredWebGpuRenderer,
@@ -31,9 +34,10 @@ type Origin = { x: number; y: number; z: number }
 type Props = {
   sections: ReplayWorldSection[]
   eventsBySection: ReadonlyMap<string, TimedReplayEvent[]>
-  playhead: number
-  players: ReplayPlayerFrame[]
-  subject: ReplayPlayerFrame | null
+  tracks: ReadonlyMap<string, PlayerSample[]>
+  subjectUuid: string
+  armSwingTimes: number[]
+  clock: ReplayPlaybackClock
   origin: Origin
   cameraMode: CameraMode
   showHitboxes: boolean
@@ -47,9 +51,11 @@ type Props = {
   onSceneReady?: () => void
 }
 
-function direction(player: ReplayPlayerFrame, target = new Vector3()) {
-  const yaw = MathUtils.degToRad(player.rotation.yaw)
-  const pitch = MathUtils.degToRad(player.rotation.pitch)
+const UP = new Vector3(0, 1, 0)
+
+function direction(yawDegrees: number, pitchDegrees: number, target = new Vector3()) {
+  const yaw = MathUtils.degToRad(yawDegrees)
+  const pitch = MathUtils.degToRad(pitchDegrees)
   const cosPitch = Math.cos(pitch)
   return target.set(
     -Math.sin(yaw) * cosPitch,
@@ -58,7 +64,25 @@ function direction(player: ReplayPlayerFrame, target = new Vector3()) {
   ).normalize()
 }
 
-function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | null; origin: Origin; mode: CameraMode }) {
+/** Advances evidence time from the same render loop that consumes actor poses. */
+function PlaybackDriver({ clock }: { clock: ReplayPlaybackClock }) {
+  useFrame((_, delta) => {
+    clock.advance(delta * 1000)
+  }, -100)
+  return null
+}
+
+function CameraRig({
+  track,
+  clock,
+  origin,
+  mode,
+}: {
+  track: PlayerSample[] | undefined
+  clock: ReplayPlaybackClock
+  origin: Origin
+  mode: CameraMode
+}) {
   const { camera } = useThree()
   const local = useMemo(() => new Vector3(), [])
   const desired = useMemo(() => new Vector3(), [])
@@ -67,20 +91,21 @@ function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | nul
   const horizontal = useMemo(() => new Vector3(), [])
 
   useFrame((_, delta) => {
-    if (!subject || mode === 'free') return
+    if (mode === 'free') return
+    const subject = samplePlayerTrack(track, clock.getTimeMs())
+    if (!subject) return
 
     local.set(
       subject.position.x - origin.x,
       subject.position.y - origin.y,
       subject.position.z - origin.z,
     )
-    direction(subject, aim)
+    direction(subject.rotation.yaw, subject.rotation.pitch, aim)
     const eyeHeight = subject.sneaking ? 1.5 : 1.62
 
     if (mode === 'pov') {
-      // POV is evidence, not a cinematic chase camera. The previous extra lerp
-      // deliberately lagged behind the already-interpolated replay track and made
-      // mouse/head motion feel delayed. Match the recorded eye position directly.
+      // POV consumes the exact same render-frame sample as the player actor. There
+      // is deliberately no second interpolation/damping layer here.
       desired.copy(local).y += eyeHeight
       lookAt.copy(desired).addScaledVector(aim, 10)
       camera.position.copy(desired)
@@ -91,83 +116,152 @@ function CameraRig({ subject, origin, mode }: { subject: ReplayPlayerFrame | nul
     horizontal.copy(aim).setY(0)
     if (horizontal.lengthSq() < 0.001) horizontal.set(0, 0, 1)
     horizontal.normalize()
-    desired.copy(local).y += 2.3
+    desired.copy(local).y += subject.sneaking ? 2.0 : 2.3
     desired.addScaledVector(horizontal, -5.4)
-    lookAt.copy(local).y += 1.05
+    lookAt.copy(local).y += subject.sneaking ? 0.9 : 1.05
 
-    // Keep a little third-person camera inertia, but follow tightly enough that the
-    // subject does not visibly outrun the camera between replay samples.
-    camera.position.lerp(desired, 1 - Math.exp(-delta * 16))
+    // Follow remains intentionally cinematic, but its target pose is sampled at
+    // render rate rather than following a throttled React actor object.
+    camera.position.lerp(desired, 1 - Math.exp(-delta * 18))
     camera.lookAt(lookAt)
-  })
+  }, -50)
 
   return null
 }
 
-function DirectionRay({
-  start,
-  vector,
-  color,
-  radius,
+function PlayerActor({
+  track,
+  clock,
+  origin,
+  isSubject,
+  showHitbox,
+  armSwingTimes,
 }: {
-  start: Vector3
-  vector: Vector3
-  color: string
-  radius: number
+  track: PlayerSample[]
+  clock: ReplayPlaybackClock
+  origin: Origin
+  isSubject: boolean
+  showHitbox: boolean
+  armSwingTimes: number[]
 }) {
-  const length = vector.length()
-  if (length <= 0.0001) return null
-  const midpoint = start.clone().addScaledVector(vector, 0.5)
-  const quaternion = new Quaternion().setFromUnitVectors(
-    new Vector3(0, 1, 0),
-    vector.clone().normalize(),
-  )
-  const position = midpoint.toArray() as [number, number, number]
+  const root = useRef<Group>(null)
+  const bodyYaw = useRef<Group>(null)
+  const poseRoot = useRef<Group>(null)
+  const head = useRef<Group>(null)
+  const leftArm = useRef<Group>(null)
+  const rightArm = useRef<Group>(null)
+  const leftLeg = useRef<Group>(null)
+  const rightLeg = useRef<Group>(null)
+  const hitbox = useRef<Group>(null)
+  const aimRay = useRef<Group>(null)
+  const aim = useMemo(() => new Vector3(), [])
+  const midpoint = useMemo(() => new Vector3(), [])
+  const rayQuaternion = useMemo(() => new Quaternion(), [])
 
-  return (
-    <mesh position={position} quaternion={quaternion}>
-      <cylinderGeometry args={[radius, radius, length, 5, 1, false]} />
-      <meshBasicMaterial color={color} transparent opacity={0.72} depthWrite={false} />
-    </mesh>
-  )
-}
-
-function PlayerModel({ player, origin, showHitbox }: { player: ReplayPlayerFrame; origin: Origin; showHitbox: boolean }) {
-  const isSubject = player.subject
+  const name = track[0]?.name ?? 'Player'
   const body = isSubject ? '#2fd5c4' : '#63a9ec'
   const dark = isSubject ? '#1b8f87' : '#376d9e'
-  const x = player.position.x - origin.x
-  const y = player.position.y - origin.y
-  const z = player.position.z - origin.z
-  const yaw = -MathUtils.degToRad(player.rotation.yaw)
-  const crouch = player.sneaking ? -0.12 : 0
-  const eyeHeight = player.sneaking ? 1.5 : 1.62
-  const aim = direction(player).multiplyScalar(isSubject ? 4 : 2.2)
+
+  useFrame(() => {
+    const actor = samplePlayerTrack(track, clock.getTimeMs())
+    if (!root.current) return
+    if (!actor) {
+      root.current.visible = false
+      return
+    }
+    root.current.visible = true
+
+    root.current.position.set(
+      actor.position.x - origin.x,
+      actor.position.y - origin.y,
+      actor.position.z - origin.z,
+    )
+
+    if (bodyYaw.current) bodyYaw.current.rotation.y = -MathUtils.degToRad(actor.rotation.yaw)
+
+    const crouching = Boolean(actor.sneaking)
+    if (poseRoot.current) {
+      poseRoot.current.position.y = crouching ? -0.12 : 0
+      poseRoot.current.rotation.x = crouching ? 0.18 : 0
+    }
+
+    if (head.current) head.current.rotation.x = MathUtils.degToRad(actor.rotation.pitch)
+
+    // Visual locomotion is derived from the recorded segment velocity. It never
+    // changes the actor's evidence position; only limb pose is animated between
+    // snapshots so 10/20 Hz recordings do not look like sliding mannequins.
+    const movement = Math.min(1, actor.horizontal_speed / (actor.sprinting ? 5.6 : 4.3))
+    const moving = movement > 0.015
+    const gaitFrequency = actor.sprinting ? 0.016 : 0.013
+    const gait = moving ? Math.sin(clock.getTimeMs() * gaitFrequency) : 0
+    const stride = gait * movement * (actor.sprinting ? 1.05 : 0.82)
+
+    const swingProgress = isSubject ? latestEventProgress(armSwingTimes, clock.getTimeMs(), 320) : 0
+    const attackSwing = swingProgress > 0 ? Math.sin(swingProgress * Math.PI) * 1.55 : 0
+
+    if (leftArm.current) leftArm.current.rotation.x = stride
+    if (rightArm.current) rightArm.current.rotation.x = -stride - attackSwing
+    if (leftLeg.current) leftLeg.current.rotation.x = -stride
+    if (rightLeg.current) rightLeg.current.rotation.x = stride
+
+    if (hitbox.current) {
+      const height = crouching ? 1.5 : 1.8
+      hitbox.current.visible = showHitbox
+      hitbox.current.position.y = height / 2
+      hitbox.current.scale.y = height
+    }
+
+    if (aimRay.current) {
+      const eyeHeight = crouching ? 1.5 : 1.62
+      const length = isSubject ? 4 : 2.2
+      direction(actor.rotation.yaw, actor.rotation.pitch, aim)
+      midpoint.copy(aim).multiplyScalar(length / 2).add(new Vector3(0, eyeHeight, 0))
+      rayQuaternion.setFromUnitVectors(UP, aim)
+      aimRay.current.position.copy(midpoint)
+      aimRay.current.quaternion.copy(rayQuaternion)
+      aimRay.current.scale.set(1, length, 1)
+    }
+  })
 
   return (
-    <group position={[x, y, z]}>
-      <group rotation={[0, yaw, 0]}>
-        <group position={[0, crouch, 0]} rotation={[player.sneaking ? 0.18 : 0, 0, 0]}>
-          <mesh position={[0, 1.55, 0]}><boxGeometry args={[0.5, 0.5, 0.5]} /><meshStandardMaterial color={body} /></mesh>
+    <group ref={root}>
+      <group ref={bodyYaw}>
+        <group ref={poseRoot}>
+          <group ref={head} position={[0, 1.55, 0]}>
+            <mesh><boxGeometry args={[0.5, 0.5, 0.5]} /><meshStandardMaterial color={body} /></mesh>
+          </group>
           <mesh position={[0, 0.98, 0]}><boxGeometry args={[0.56, 0.72, 0.3]} /><meshStandardMaterial color={dark} /></mesh>
-          <mesh position={[-0.39, 1.0, 0]}><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
-          <mesh position={[0.39, 1.0, 0]}><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
-          <mesh position={[-0.16, 0.36, 0]}><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
-          <mesh position={[0.16, 0.36, 0]}><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
+          <group ref={leftArm} position={[-0.39, 1.28, 0]}>
+            <mesh position={[0, -0.28, 0]}><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
+          </group>
+          <group ref={rightArm} position={[0.39, 1.28, 0]}>
+            <mesh position={[0, -0.28, 0]}><boxGeometry args={[0.18, 0.7, 0.22]} /><meshStandardMaterial color={body} /></mesh>
+          </group>
+          <group ref={leftLeg} position={[-0.16, 0.72, 0]}>
+            <mesh position={[0, -0.36, 0]}><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
+          </group>
+          <group ref={rightLeg} position={[0.16, 0.72, 0]}>
+            <mesh position={[0, -0.36, 0]}><boxGeometry args={[0.22, 0.72, 0.25]} /><meshStandardMaterial color={dark} /></mesh>
+          </group>
         </group>
       </group>
-      {showHitbox && <mesh position={[0, 0.9, 0]}><boxGeometry args={[0.62, 1.8, 0.62]} /><meshBasicMaterial color={isSubject ? '#58f3e5' : '#8bc9ff'} wireframe transparent opacity={0.65} /></mesh>}
-      <Html position={[0, 2.05 + crouch, 0]} center distanceFactor={10} style={{ pointerEvents: 'none' }}>
+
+      <group ref={hitbox} visible={showHitbox}>
+        <mesh><boxGeometry args={[0.62, 1, 0.62]} /><meshBasicMaterial color={isSubject ? '#58f3e5' : '#8bc9ff'} wireframe transparent opacity={0.65} /></mesh>
+      </group>
+
+      <Html position={[0, 2.05, 0]} center distanceFactor={10} style={{ pointerEvents: 'none' }}>
         <div className={`replay3d-nameplate${isSubject ? ' replay3d-nameplate--subject' : ''}`}>
-          {player.name}{isSubject ? ' · SUBJECT' : ''}
+          {name}{isSubject ? ' · SUBJECT' : ''}
         </div>
       </Html>
-      <DirectionRay
-        start={new Vector3(0, eyeHeight, 0)}
-        vector={aim}
-        color={isSubject ? '#38e2d0' : '#6baee8'}
-        radius={isSubject ? 0.012 : 0.007}
-      />
+
+      <group ref={aimRay}>
+        <mesh>
+          <cylinderGeometry args={[isSubject ? 0.012 : 0.007, isSubject ? 0.012 : 0.007, 1, 5, 1, false]} />
+          <meshBasicMaterial color={isSubject ? '#38e2d0' : '#6baee8'} transparent opacity={0.72} depthWrite={false} />
+        </mesh>
+      </group>
     </group>
   )
 }
@@ -227,9 +321,10 @@ function SceneReady({ token, onReady }: { token: string; onReady?: () => void })
 
 function Scene({
   preparedWorld,
-  playhead,
-  players,
-  subject,
+  tracks,
+  subjectUuid,
+  armSwingTimes,
+  clock,
   origin,
   cameraMode,
   showHitboxes,
@@ -241,8 +336,10 @@ function Scene({
   preparedWorld: PreparedReplayMeshWorld
   textures: ReadonlyMap<string, Texture>
 }) {
-  const target: [number, number, number] = subject
-    ? [subject.position.x - origin.x, subject.position.y - origin.y + 1, subject.position.z - origin.z]
+  const subjectTrack = findSubjectTrack(tracks, subjectUuid)
+  const firstSubject = subjectTrack?.[0]
+  const target: [number, number, number] = firstSubject
+    ? [firstSubject.position.x - origin.x, firstSubject.position.y - origin.y + 1, firstSubject.position.z - origin.z]
     : [0, 1, 0]
   const env = environment(worldContext)
 
@@ -254,16 +351,25 @@ function Scene({
       <directionalLight position={[28, 45, 18]} intensity={env.sun} />
       <hemisphereLight args={[env.hemiSky, env.hemiGround, 0.4]} />
 
-      <MinecraftWorldMesh world={preparedWorld} playhead={playhead} origin={origin} textures={textures} />
-      {players.map((player) => <PlayerModel key={player.uuid} player={player} origin={origin} showHitbox={showHitboxes} />)}
+      <PlaybackDriver clock={clock} />
+      <MinecraftWorldMesh world={preparedWorld} clock={clock} origin={origin} textures={textures} />
+      {[...tracks.entries()].map(([uuid, track]) => (
+        <PlayerActor
+          key={uuid}
+          track={track}
+          clock={clock}
+          origin={origin}
+          isSubject={uuid === subjectUuid || track.some((sample) => sample.subject)}
+          showHitbox={showHitboxes}
+          armSwingTimes={armSwingTimes}
+        />
+      ))}
 
-      <CameraRig subject={subject} origin={origin} mode={cameraMode} />
+      <CameraRig track={subjectTrack} clock={clock} origin={origin} mode={cameraMode} />
       <OrbitControls
         enabled={cameraMode === 'free'}
         target={target}
         makeDefault
-        // Freecam should track input immediately. Damping made mouse movement feel
-        // several frames behind, which is especially obvious while the replay runs.
         enableDamping={false}
         rotateSpeed={0.85}
         zoomSpeed={1.1}
@@ -397,9 +503,10 @@ export function ReplayScene3D(props: Props) {
   if (!preparedWorld) return <EngineOverlay title="Preparing Minecraft geometry" detail={meshProgressText(meshProgress)} />
   if (rendererError) return <EngineOverlay error title="WebGPU renderer failed" detail={rendererError} />
 
-  const subject = props.subject
-  const initialPosition: [number, number, number] = subject
-    ? [subject.position.x - props.origin.x + 7, subject.position.y - props.origin.y + 5, subject.position.z - props.origin.z + 7]
+  const subjectTrack = findSubjectTrack(props.tracks, props.subjectUuid)
+  const firstSubject = subjectTrack?.[0]
+  const initialPosition: [number, number, number] = firstSubject
+    ? [firstSubject.position.x - props.origin.x + 7, firstSubject.position.y - props.origin.y + 5, firstSubject.position.z - props.origin.z + 7]
     : [8, 7, 8]
 
   const ready = () => {

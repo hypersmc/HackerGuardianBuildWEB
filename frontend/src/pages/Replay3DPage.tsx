@@ -3,6 +3,8 @@ import { useQueries, useQuery } from '@tanstack/react-query'
 import { replayApi } from '../features/replays/api'
 import { minecraftAssetApi, type MinecraftAssetManifest } from '../features/replays/minecraftAssets'
 import { ReplayScene3D } from '../features/replays/ReplayScene3D'
+import { buildPlayerTracks, findSubjectTrack, samplePlayerTrack } from '../features/replays/replayActors'
+import { ReplayPlaybackClock, useReplayClock } from '../features/replays/replayClock'
 import { collectReplayTextureAssets, loadReplayTextures } from '../features/replays/replayPreload'
 import {
   collectRecordedBlockStates,
@@ -12,9 +14,7 @@ import {
 } from '../features/replays/replaySections'
 import type {
   CameraMode,
-  PlayerSample,
   ReplayEvent,
-  ReplayPlayerFrame,
   WorldChunkData,
 } from '../features/replays/types'
 import { flattenEvents } from '../features/replays/voxel'
@@ -43,51 +43,6 @@ function formatBytes(bytes: number) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value))
-}
-
-function lerpAngle(a: number, b: number, amount: number) {
-  const delta = ((b - a + 540) % 360) - 180
-  return a + delta * amount
-}
-
-function interpolateTrack(track: PlayerSample[], time: number): ReplayPlayerFrame | null {
-  if (track.length === 0) return null
-  if (time <= track[0].t) return track[0]
-  if (time >= track[track.length - 1].t) {
-    const last = track[track.length - 1]
-    return time - last.t <= 2500 || last.subject ? last : null
-  }
-
-  let low = 0
-  let high = track.length - 1
-  while (low + 1 < high) {
-    const mid = (low + high) >> 1
-    if (track[mid].t <= time) low = mid
-    else high = mid
-  }
-
-  const before = track[low]
-  const after = track[high]
-  if (!before.subject && time - before.t > 2500 && after.t - time > 2500) return null
-  const span = Math.max(1, after.t - before.t)
-  const amount = clamp((time - before.t) / span, 0, 1)
-
-  return {
-    ...before,
-    position: {
-      x: before.position.x + (after.position.x - before.position.x) * amount,
-      y: before.position.y + (after.position.y - before.position.y) * amount,
-      z: before.position.z + (after.position.z - before.position.z) * amount,
-    },
-    rotation: {
-      yaw: lerpAngle(before.rotation.yaw, after.rotation.yaw, amount),
-      pitch: before.rotation.pitch + (after.rotation.pitch - before.rotation.pitch) * amount,
-    },
-    on_ground: amount < 0.5 ? before.on_ground : after.on_ground,
-    sneaking: amount < 0.5 ? before.sneaking : after.sneaking,
-    sprinting: amount < 0.5 ? before.sprinting : after.sprinting,
-    held_item: amount < 0.5 ? before.held_item : after.held_item,
-  }
 }
 
 function eventLabel(event: ReplayEvent & { t?: number }) {
@@ -125,7 +80,7 @@ function ReplayLoadGate({
         <p>
           {failed
             ? 'Playback stays locked until every required component is available.'
-            : 'Timeline, full recorded chunk keyframes, render assets and the first GPU frame must all be ready before playback unlocks.'}
+            : 'Timeline, full recorded chunk keyframes, render assets, actor tracks and the first GPU frame must all be ready before playback unlocks.'}
         </p>
         <div className="replay-preload__progress"><i style={{ width: `${progress}%` }} /></div>
         <div className="replay-preload__rows">
@@ -164,14 +119,17 @@ function ReplayLoadGate({
 export function Replay3DPage() {
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [manualPackId, setManualPackId] = useState<string | null>(null)
-  const [playhead, setPlayhead] = useState(0)
-  const [playing, setPlaying] = useState(false)
-  const [speed, setSpeed] = useState(1)
   const [cameraMode, setCameraMode] = useState<CameraMode>('follow')
   const [showHitboxes, setShowHitboxes] = useState(true)
   const [sceneReady, setSceneReady] = useState(false)
   const [textureProgress, setTextureProgress] = useState({ loaded: 0, total: 0 })
   const stageRef = useRef<HTMLDivElement>(null)
+
+  // One clock per selected replay. The WebGPU scene owns advancement; React only
+  // observes a throttled 20 Hz UI snapshot for controls and inspector text.
+  const clock = useMemo(() => new ReplayPlaybackClock(), [selectedId])
+  const playback = useReplayClock(clock)
+  const playhead = playback.timeMs
 
   const list = useQuery({
     queryKey: ['replays', '3d-library'],
@@ -320,41 +278,23 @@ export function Replay3DPage() {
     retry: false,
   })
 
-  const tracks = useMemo(() => {
-    const result = new Map<string, PlayerSample[]>()
-    for (const frame of frames) {
-      for (const player of frame.players) {
-        const track = result.get(player.uuid) ?? []
-        track.push({ ...player, t: frame.t })
-        result.set(player.uuid, track)
-      }
-    }
-    return result
-  }, [frames])
-
-  const players = useMemo(() => {
-    const current: ReplayPlayerFrame[] = []
-    for (const track of tracks.values()) {
-      const player = interpolateTrack(track, playhead)
-      if (player) current.push(player)
-    }
-    return current
-  }, [tracks, playhead])
-
-  const subject = players.find((player) => player.subject)
-    ?? players.find((player) => player.uuid === manifest.data?.player_uuid)
-    ?? null
+  const tracks = useMemo(() => buildPlayerTracks(frames), [frames])
+  const subjectTrack = findSubjectTrack(tracks, manifest.data?.player_uuid)
+  const subject = samplePlayerTrack(subjectTrack, playhead)
+  const armSwingTimes = useMemo(
+    () => events.filter((event) => event.type === 'ARM_SWING').map((event) => event.t),
+    [events],
+  )
 
   const origin = useMemo(() => {
-    const subjectTrack = manifest.data ? tracks.get(manifest.data.player_uuid) : undefined
-    const first = subjectTrack?.[0]
+    const first = findSubjectTrack(tracks, manifest.data?.player_uuid)?.[0]
     if (!first) return { x: 0, y: 0, z: 0 }
     return {
       x: Math.floor(first.position.x),
       y: Math.floor(first.position.y),
       z: Math.floor(first.position.z),
     }
-  }, [manifest.data, tracks])
+  }, [manifest.data?.player_uuid, tracks])
 
   const duration = Math.max(
     manifest.data?.duration_ms ?? 0,
@@ -362,18 +302,9 @@ export function Replay3DPage() {
     frames.at(-1)?.t ?? 0,
   )
 
-  const blockEventRevision = useMemo(() => {
-    let revision = 0
-    for (const event of events) {
-      if ((event.type === 'BLOCK_BREAK' || event.type === 'BLOCK_PLACE') && event.t <= playhead) revision++
-    }
-    return revision
-  }, [events, playhead])
-  // World geometry only changes on a block-event boundary. Keeping a stable world
-  // playhead between those boundaries lets the complete section-mesh subtree stay
-  // memoized while players/camera continue at normal replay frame rate.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  const worldPlayhead = useMemo(() => playhead, [selectedId, blockEventRevision])
+  useEffect(() => {
+    clock.setDuration(duration)
+  }, [clock, duration])
 
   const packChoiceRequired = Boolean(
     manifest.isSuccess
@@ -390,9 +321,11 @@ export function Replay3DPage() {
     && (assetPackId ? assetPackQuery.isSuccess && textureQuery.isSuccess : noRenderPackAvailable || !worldSnapshotAvailable)
   const dataReady = manifest.isSuccess && allReplayChunksLoaded && allWorldChunksLoaded && assetReady
   const canStart = dataReady && sceneReady
-  const assetPack = assetPackQuery.data && assetPackId && textureQuery.data
-    ? { id: assetPackId, catalog: assetPackQuery.data.catalog, textures: textureQuery.data }
-    : null
+  const assetPack = useMemo(() => (
+    assetPackQuery.data && assetPackId && textureQuery.data
+      ? { id: assetPackId, catalog: assetPackQuery.data.catalog, textures: textureQuery.data }
+      : null
+  ), [assetPackQuery.data, assetPackId, textureQuery.data])
   const sceneToken = `${selectedId ?? 'none'}:${assetPackId ?? 'fallback'}:${frames.length}:${worldSections.length}:${requiredTextureAssets.length}`
 
   const currentEvents = useMemo(() => events.filter((event) => Math.abs(event.t - playhead) <= 650).slice(-12), [events, playhead])
@@ -453,7 +386,7 @@ export function Replay3DPage() {
     {
       label: 'GPU scene',
       state: sceneReady ? 'ready' : dataReady ? 'loading' : 'waiting',
-      detail: sceneReady ? `${worldSections.length} section meshes compiled` : dataReady ? 'building section meshes and compiling shaders' : 'waiting for replay data/assets',
+      detail: sceneReady ? `${worldSections.length} section meshes + ${tracks.size} actor tracks ready` : dataReady ? 'building section meshes, actor runtime and compiling shaders' : 'waiting for replay data/assets',
     },
   ]
 
@@ -462,8 +395,6 @@ export function Replay3DPage() {
   const preloadProgress = Math.round((completedGateRows / preloadRows.length) * 100)
 
   useEffect(() => {
-    setPlaying(false)
-    setPlayhead(0)
     setSceneReady(false)
     setTextureProgress({ loaded: 0, total: 0 })
   }, [selectedId])
@@ -478,51 +409,26 @@ export function Replay3DPage() {
   }, [dataReady])
 
   useEffect(() => {
-    if (!canStart) setPlaying(false)
-  }, [canStart])
-
-  useEffect(() => {
-    if (!playing || !canStart || duration <= 0) return
-    let frameId = 0
-    let previous = performance.now()
-
-    const tick = (now: number) => {
-      // Evidence playback must not jump forward by the duration of a browser/main-
-      // thread stall. If a frame is delayed, slow the replay instead of skipping it.
-      const elapsed = Math.min(100, Math.max(0, now - previous))
-      previous = now
-      setPlayhead((current) => {
-        const next = current + elapsed * speed
-        if (next >= duration) {
-          queueMicrotask(() => setPlaying(false))
-          return duration
-        }
-        return next
-      })
-      frameId = requestAnimationFrame(tick)
-    }
-
-    frameId = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(frameId)
-  }, [playing, canStart, speed, duration])
+    if (!canStart) clock.setPlaying(false)
+  }, [canStart, clock])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.target instanceof HTMLInputElement || event.target instanceof HTMLSelectElement) return
       if (event.code === 'Space') {
         event.preventDefault()
-        if (canStart) setPlaying((value) => !value)
+        if (canStart) clock.toggle()
       } else if (event.code === 'ArrowLeft' && canStart) {
-        setPlayhead((value) => clamp(value - 1000, 0, duration))
+        clock.step(-1000)
       } else if (event.code === 'ArrowRight' && canStart) {
-        setPlayhead((value) => clamp(value + 1000, 0, duration))
+        clock.step(1000)
       } else if (event.key === '1') setCameraMode('free')
       else if (event.key === '2') setCameraMode('follow')
       else if (event.key === '3') setCameraMode('pov')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [canStart, duration])
+  }, [canStart, clock])
 
   function setLegacyPack(id: string | null) {
     setManualPackId(id)
@@ -579,9 +485,10 @@ export function Replay3DPage() {
               <ReplayScene3D
                 sections={worldSections}
                 eventsBySection={eventsBySection}
-                playhead={worldPlayhead}
-                players={players}
-                subject={subject}
+                tracks={tracks}
+                subjectUuid={manifest.data.player_uuid}
+                armSwingTimes={armSwingTimes}
+                clock={clock}
                 origin={origin}
                 cameraMode={cameraMode}
                 showHitboxes={showHitboxes}
@@ -619,7 +526,7 @@ export function Replay3DPage() {
           </div>
 
           <div className="replay3d-controls">
-            <button type="button" onClick={() => setPlaying((value) => !value)} disabled={!canStart}>{playing ? '❚❚' : '▶'}</button>
+            <button type="button" onClick={() => clock.toggle()} disabled={!canStart}>{playback.playing ? '❚❚' : '▶'}</button>
             <span className="replay3d-time">{formatDuration(playhead)}</span>
             <div className="replay3d-timeline-wrap">
               <input
@@ -631,8 +538,8 @@ export function Replay3DPage() {
                 value={clamp(playhead, 0, Math.max(1, duration))}
                 disabled={!canStart}
                 onChange={(event) => {
-                  setPlaying(false)
-                  setPlayhead(Number(event.target.value))
+                  clock.setPlaying(false)
+                  clock.seek(Number(event.target.value))
                 }}
               />
               <button
@@ -641,11 +548,11 @@ export function Replay3DPage() {
                 title={`Jump to trigger at ${formatDuration(triggerOffset)}`}
                 type="button"
                 disabled={!canStart}
-                onClick={() => setPlayhead(triggerOffset)}
+                onClick={() => clock.seek(triggerOffset)}
               />
             </div>
             <span className="replay3d-time">{formatDuration(duration)}</span>
-            <select value={speed} onChange={(event) => setSpeed(Number(event.target.value))} aria-label="Playback speed">
+            <select value={playback.speed} onChange={(event) => clock.setSpeed(Number(event.target.value))} aria-label="Playback speed">
               <option value={0.25}>0.25×</option><option value={0.5}>0.5×</option><option value={1}>1×</option><option value={2}>2×</option><option value={4}>4×</option>
             </select>
           </div>
@@ -685,6 +592,7 @@ export function Replay3DPage() {
               <div><dt>Ground</dt><dd>{subject?.on_ground === undefined ? '—' : subject.on_ground ? 'yes' : 'no'}</dd></div>
               <div><dt>Pose</dt><dd>{subject?.sneaking ? 'sneaking' : subject?.sprinting ? 'sprinting' : 'standing'}</dd></div>
               <div><dt>Held</dt><dd>{subject?.held_item ?? '—'}</dd></div>
+              <div><dt>Speed</dt><dd>{subject ? `${subject.horizontal_speed.toFixed(2)} b/s` : '—'}</dd></div>
             </dl>
           </section>
 
@@ -692,7 +600,7 @@ export function Replay3DPage() {
             <label>Events near playhead</label>
             {currentEvents.length === 0 && <div className="replay3d-no-events">No recorded event in ±650 ms.</div>}
             {currentEvents.map((event, index) => (
-              <button type="button" className="replay3d-event" key={`${event.t}-${event.type}-${index}`} onClick={() => canStart && setPlayhead(event.t)} disabled={!canStart}>
+              <button type="button" className="replay3d-event" key={`${event.t}-${event.type}-${index}`} onClick={() => canStart && clock.seek(event.t)} disabled={!canStart}>
                 <time>{formatDuration(event.t)}</time>
                 <span>{eventLabel(event)}</span>
               </button>
@@ -705,6 +613,8 @@ export function Replay3DPage() {
               <div><dt>Trigger</dt><dd>{formatDuration(triggerOffset)}</dd></div>
               <div><dt>Frames</dt><dd>{frames.length.toLocaleString()}</dd></div>
               <div><dt>Players</dt><dd>{tracks.size}</dd></div>
+              <div><dt>Actor clock</dt><dd>WebGPU render loop</dd></div>
+              <div><dt>UI clock</dt><dd>20 Hz</dd></div>
               <div><dt>Minecraft</dt><dd>{worldContext?.minecraft_version ?? 'not recorded'}</dd></div>
               <div><dt>Dimension</dt><dd>{worldContext?.environment ?? 'unknown'}</dd></div>
               <div><dt>Render pack</dt><dd>{assetPackId ? `${assetPackId} · ${packSource}` : 'not selected'}</dd></div>
