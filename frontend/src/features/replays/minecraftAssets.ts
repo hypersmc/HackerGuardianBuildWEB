@@ -70,18 +70,18 @@ export type MinecraftAssetPack = {
   catalog: MinecraftAssetCatalog
 }
 
-async function localData<T>(path: string): Promise<T> {
-  const envelope = await api<HgEnvelope<T>>(path)
+async function localData<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const envelope = await api<HgEnvelope<T>>(path, { signal })
   return envelope.data
 }
 
 export const minecraftAssetApi = {
-  list() {
-    return localData<{ packs: MinecraftAssetManifest[] }>('/api/v1/replay-assets')
+  list(signal?: AbortSignal) {
+    return localData<{ packs: MinecraftAssetManifest[] }>('/api/v1/replay-assets', signal)
   },
 
-  catalog(packId: string) {
-    return localData<MinecraftAssetPack>(`/api/v1/replay-assets/${encodeURIComponent(packId)}/catalog`)
+  catalog(packId: string, signal?: AbortSignal) {
+    return localData<MinecraftAssetPack>(`/api/v1/replay-assets/${encodeURIComponent(packId)}/catalog`, signal)
   },
 
   textureUrl(packId: string, asset: string) {
