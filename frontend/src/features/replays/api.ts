@@ -8,32 +8,32 @@ import type {
   WorldSnapshotManifest,
 } from './types'
 
-async function hgData<T>(path: string): Promise<T> {
-  const envelope = await api<HgEnvelope<T>>(path)
+async function hgData<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const envelope = await api<HgEnvelope<T>>(path, { signal })
   return envelope.data
 }
 
 export const replayApi = {
-  list(params = new URLSearchParams({ page: '1', per_page: '30' })) {
-    return hgData<ReplayList>(`/api/v1/replays?${params.toString()}`)
+  list(params = new URLSearchParams({ page: '1', per_page: '30' }), signal?: AbortSignal) {
+    return hgData<ReplayList>(`/api/v1/replays?${params.toString()}`, signal)
   },
 
-  manifest(replayId: number) {
-    return hgData<ReplayManifest>(`/api/v1/replays/${replayId}`)
+  manifest(replayId: number, signal?: AbortSignal) {
+    return hgData<ReplayManifest>(`/api/v1/replays/${replayId}`, signal)
   },
 
-  chunk(replayId: number, seq: number) {
-    return hgData<ReplayChunkData>(`/api/v1/replays/${replayId}/chunks/${seq}`)
+  chunk(replayId: number, seq: number, signal?: AbortSignal) {
+    return hgData<ReplayChunkData>(`/api/v1/replays/${replayId}/chunks/${seq}`, signal)
   },
 
-  world(replayId: number) {
-    return hgData<WorldSnapshotManifest & { replay_id: number }>(`/api/v1/replays/${replayId}/world`)
+  world(replayId: number, signal?: AbortSignal) {
+    return hgData<WorldSnapshotManifest & { replay_id: number }>(`/api/v1/replays/${replayId}/world`, signal)
   },
 
-  worldChunk(replayId: number, chunkX: number, chunkZ: number, world?: string) {
+  worldChunk(replayId: number, chunkX: number, chunkZ: number, world?: string, signal?: AbortSignal) {
     const params = new URLSearchParams()
     if (world) params.set('world', world)
     const suffix = params.size ? `?${params.toString()}` : ''
-    return hgData<WorldChunkData>(`/api/v1/replays/${replayId}/world/chunks/${chunkX}/${chunkZ}${suffix}`)
+    return hgData<WorldChunkData>(`/api/v1/replays/${replayId}/world/chunks/${chunkX}/${chunkZ}${suffix}`, signal)
   },
 }
