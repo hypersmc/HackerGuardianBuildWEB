@@ -129,6 +129,66 @@ function CameraRig({
   return null
 }
 
+function FirstPersonViewModel({
+  track,
+  clock,
+  armSwingTimes,
+}: {
+  track: PlayerSample[]
+  clock: ReplayPlaybackClock
+  armSwingTimes: number[]
+}) {
+  const { camera } = useThree()
+  const root = useRef<Group>(null)
+  const rightArm = useRef<Group>(null)
+
+  useFrame(() => {
+    if (!root.current || !rightArm.current) return
+    const actor = samplePlayerTrack(track, clock.getTimeMs())
+    if (!actor) {
+      root.current.visible = false
+      return
+    }
+
+    root.current.visible = true
+    root.current.position.copy(camera.position)
+    root.current.quaternion.copy(camera.quaternion)
+
+    const swingProgress = latestEventProgress(armSwingTimes, clock.getTimeMs(), 320)
+    const swing = swingProgress > 0 ? Math.sin(swingProgress * Math.PI) : 0
+    const swingArc = swingProgress > 0 ? Math.sin(Math.sqrt(swingProgress) * Math.PI * 2) : 0
+    const movement = Math.min(1, actor.horizontal_speed / (actor.sprinting ? 5.6 : 4.3))
+    const gait = actor.on_ground
+      ? Math.sin(clock.getTimeMs() * (actor.sprinting ? 0.018 : 0.014)) * movement
+      : 0
+
+    // This is deliberately a camera-space viewmodel rather than the subject's
+    // world-space body. Minecraft first person renders the right hand in front of
+    // the camera and does not put the camera inside the third-person player model.
+    rightArm.current.position.set(
+      0.54 - swing * 0.18,
+      -0.40 + swingArc * 0.07 - Math.abs(gait) * 0.015,
+      -0.78 + swing * 0.16,
+    )
+    rightArm.current.rotation.set(
+      -0.42 - swing * 0.95 + gait * 0.035,
+      -0.42 + swing * 0.32,
+      -0.08 - swingArc * 0.25,
+    )
+  }, 10)
+
+  return (
+    <group ref={root}>
+      <group ref={rightArm}>
+        <mesh position={[0, -0.30, 0]} renderOrder={1000} frustumCulled={false}>
+          <boxGeometry args={[0.18, 0.70, 0.22]} />
+          <meshStandardMaterial color="#2fd5c4" depthTest={false} depthWrite={false} />
+        </mesh>
+      </group>
+    </group>
+  )
+}
+
 function PlayerActor({
   track,
   clock,
@@ -353,17 +413,24 @@ function Scene({
 
       <PlaybackDriver clock={clock} />
       <MinecraftWorldMesh world={preparedWorld} clock={clock} origin={origin} textures={textures} />
-      {[...tracks.entries()].map(([uuid, track]) => (
-        <PlayerActor
-          key={uuid}
-          track={track}
-          clock={clock}
-          origin={origin}
-          isSubject={uuid === subjectUuid || track.some((sample) => sample.subject)}
-          showHitbox={showHitboxes}
-          armSwingTimes={armSwingTimes}
-        />
-      ))}
+      {[...tracks.entries()].map(([uuid, track]) => {
+        const isSubject = uuid === subjectUuid || track.some((sample) => sample.subject)
+        if (cameraMode === 'pov' && isSubject) return null
+        return (
+          <PlayerActor
+            key={uuid}
+            track={track}
+            clock={clock}
+            origin={origin}
+            isSubject={isSubject}
+            showHitbox={showHitboxes}
+            armSwingTimes={armSwingTimes}
+          />
+        )
+      })}
+      {cameraMode === 'pov' && subjectTrack && (
+        <FirstPersonViewModel track={subjectTrack} clock={clock} armSwingTimes={armSwingTimes} />
+      )}
 
       <CameraRig track={subjectTrack} clock={clock} origin={origin} mode={cameraMode} />
       <OrbitControls
