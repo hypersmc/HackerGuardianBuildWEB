@@ -3,7 +3,6 @@ import {
   NearestFilter,
   SRGBColorSpace,
   Texture,
-  TextureLoader,
 } from 'three'
 import type {
   MinecraftAssetCatalog,
@@ -183,11 +182,53 @@ export type ReplayTextureProgress = {
   total: number
 }
 
+function abortError() {
+  return new DOMException('Replay texture loading was cancelled', 'AbortError')
+}
+
+function disposeTexture(texture: Texture) {
+  const image = texture.image as { close?: () => void } | undefined
+  texture.dispose()
+  image?.close?.()
+}
+
+async function fetchTexture(packId: string, asset: string, signal: AbortSignal) {
+  if (signal.aborted) throw abortError()
+
+  const response = await fetch(minecraftAssetApi.textureUrl(packId, asset), {
+    credentials: 'include',
+    headers: { Accept: 'image/png,image/*' },
+    signal,
+  })
+  if (!response.ok) throw new Error(`Texture ${asset} failed with HTTP ${response.status}`)
+
+  const blob = await response.blob()
+  if (signal.aborted) throw abortError()
+  if (typeof createImageBitmap !== 'function') {
+    throw new Error('This browser cannot decode replay textures with createImageBitmap')
+  }
+
+  const bitmap = await createImageBitmap(blob)
+  if (signal.aborted) {
+    bitmap.close()
+    throw abortError()
+  }
+
+  const texture = new Texture(bitmap)
+  texture.colorSpace = SRGBColorSpace
+  texture.magFilter = NearestFilter
+  texture.minFilter = LinearMipmapLinearFilter
+  texture.generateMipmaps = true
+  texture.needsUpdate = true
+  return texture
+}
+
 /** Decode every required image before the replay is unlocked. */
 export async function loadReplayTextures(
   packId: string,
   assets: string[],
   onProgress?: (progress: ReplayTextureProgress) => void,
+  signal?: AbortSignal,
   concurrency = 8,
 ): Promise<Map<string, Texture>> {
   const unique = [...new Set(assets)]
@@ -195,21 +236,25 @@ export async function loadReplayTextures(
   onProgress?.({ loaded: 0, total: unique.length })
   if (unique.length === 0) return textures
 
-  const loader = new TextureLoader()
+  const controller = new AbortController()
+  const cancelFromParent = () => controller.abort()
+  if (signal?.aborted) controller.abort()
+  else signal?.addEventListener('abort', cancelFromParent, { once: true })
+
   let cursor = 0
   let loaded = 0
 
   const worker = async () => {
     while (true) {
+      if (controller.signal.aborted) throw abortError()
       const index = cursor++
       if (index >= unique.length) return
       const asset = unique[index]
-      const texture = await loader.loadAsync(minecraftAssetApi.textureUrl(packId, asset))
-      texture.colorSpace = SRGBColorSpace
-      texture.magFilter = NearestFilter
-      texture.minFilter = LinearMipmapLinearFilter
-      texture.generateMipmaps = true
-      texture.needsUpdate = true
+      const texture = await fetchTexture(packId, asset, controller.signal)
+      if (controller.signal.aborted) {
+        disposeTexture(texture)
+        throw abortError()
+      }
       textures.set(asset, texture)
       loaded++
       onProgress?.({ loaded, total: unique.length })
@@ -217,6 +262,18 @@ export async function loadReplayTextures(
   }
 
   const workerCount = Math.min(Math.max(1, concurrency), unique.length)
-  await Promise.all(Array.from({ length: workerCount }, () => worker()))
-  return textures
+  const workers = Array.from({ length: workerCount }, () => worker())
+
+  try {
+    await Promise.all(workers)
+    return textures
+  } catch (error) {
+    controller.abort()
+    await Promise.allSettled(workers)
+    for (const texture of textures.values()) disposeTexture(texture)
+    textures.clear()
+    throw error
+  } finally {
+    signal?.removeEventListener('abort', cancelFromParent)
+  }
 }
